@@ -1,41 +1,68 @@
 # AGENTS.md
 
-Operating manual for the `coalescence-non-Newtonian` component. Read `README.md`
-for scope.
-
-## What this component is
-
-Solver, cases and post-processing for the coalescence of viscoelastic drops,
-used as a controlled proxy for biomolecular condensate fusion. It is an ordinary
-independent repository. Project lifecycle, background and provisional results
-live in the owning project context, not here.
+Operating notes for the `coalescence-non-Newtonian` repository. Read
+`README.md` first for the problem and the layout.
 
 ## Scientific rules
 
-- Establish the Newtonian baseline before any viscoelastic claim, and report the
-  resolution at which the initial Stokes regime of coalescence is recovered.
-  Coalescence begins in a Stokes regime; an inertially limited viscous regime
-  appears only when the drops start at finite separation.
-- Oldroyd-B has no finite extensibility, so polymer stress is unbounded in strong
-  extension. Where the strongly elastic limit is the point of the calculation,
-  state whether the conclusion survives a finite-extensibility closure.
+- The Newtonian reference comes first. No non-Newtonian result is reported
+  until the regimes of Anthony, Harris & Basaran (2020) and the crossover
+  \(R_c(\mathrm{Oh})\) are reproduced with a stated initial bridge radius
+  \(R_0\) and the approximate point-contact condition \(Z_0 = R_0^2/2\).
+- The exterior is a passive gas with zero density and zero viscosity. Every
+  case file says so. A drop in a dynamically active exterior is a different
+  problem and is not the default here.
+- State the initial bridge geometry in every case. A finite initial gap
+  produces a Taylor–Culick regime whose duration is set by \(Z_0\); any linear
+  early regime is checked against that before being interpreted.
+- The Stokes-to-inviscid crossover is \(R_c \approx \mathrm{Oh}\), with
+  \(\mathrm{Oh}^2 = R_c^2|\ln R_c|\) at small Oh. Do not use
+  \(R_c \approx \mathrm{Oh}^2\).
 - A neck-growth exponent fitted over a limited window is weak evidence for a
-  balance. Prefer a local dimensionless test of the balance being claimed.
-- Distinguish the free-surface configuration from a drop in a dynamically active
-  exterior phase. They are different problems and the biological case is the
-  second.
-- For the inverse problem, fit only what an experiment could actually see.
-  Degrade synthetic traces to realistic spatial and temporal resolution and noise
-  before inverting, and report identifiability, not a best-fit value.
+  balance. Prefer local dimensionless tests: neck velocity rescaled by the
+  viscocapillary velocity, curvature scaling, similarity collapse.
+- Oldroyd-B has no finite extensibility. Where the strongly elastic limit is
+  the point, say whether the conclusion survives a finite-extensibility
+  closure. Report the yield-stress regularisation alongside any claim about
+  arrest or a final shape.
+- Report verification, convergence in mesh and in \(R_0\), and comparison
+  with published data as separate tests.
+
+## Repository rules
+
+- pyoomph is pinned in `pyproject.toml` / `uv.lock`. Change the pin only
+  through the pinned-environment workflow, never by hand; commit the lockfile
+  whenever it changes.
+- Local environment and build directories (`.venv*`, `.pyoomph-*`) are
+  ignored and never committed.
+- Every case validates against its schema before any run. Every run has a
+  manifest binding the case hash, the repository commit and the pyoomph
+  commit. Run output does not live in this repository.
+- pyoomph's coordinate-aware integrals already carry the axisymmetric
+  \(2\pi r\) measure; do not apply it twice.
+
+## pyoomph traps that apply here
+
+These produce a plausible, wrong answer if violated.
+
+- Never use `DirichletBC` with a value that depends on an unknown; impose it
+  through `EnforcedBC` / `EnforcedDirichlet`, which use a Lagrange multiplier.
+- Point constraints on the symmetry axis vanish in axisymmetry, because the
+  measure carries \(2\pi r\). Express axis constraints as surface integrals,
+  or pass `coordinate_system=cartesian` to the contribution.
+- `NavierStokesFreeSurface` resolves `static_interface="auto"` to a moving
+  interface only when a `BaseMovingMeshEquations` is present on the bulk
+  domain; `partial_t(..., ALE="auto")` is ALE-corrected only once mesh
+  equations exist.
+- In axisymmetry the azimuthal conformation component is named `aa`; a
+  material free surface takes no conformation boundary condition.
+- A polymer modulus of zero should remove the conformation unknowns entirely,
+  giving an exact Newtonian baseline, not a decoupled zero field.
 
 ## Documentation boundary
 
 <!-- documentation-boundary-v1 -->
 
 All content here, including this file, is public-candidate and uses calibrated
-research prose. Keep provisional simulation records, run identifiers, data paths,
-host names and debugging narrative in the project tracker and project context
-`scratch/`, not in this repository. Promotion of internal material into a
-manuscript, report, site or slide requires Vatsal's explicit approval of both the
-content and the named target. Every figure task routes through the
-`publication-plots` skill.
+research prose. Provisional results, run records and debugging narrative do
+not belong in this repository.

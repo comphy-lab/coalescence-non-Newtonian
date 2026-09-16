@@ -1,0 +1,75 @@
+{
+  "schema": "pyoomph-case-v1",
+  "case_id": "T2-Oh0.6-R0-1e-3-Z0-1e-04",
+  "geometry": {
+    "kind": "axisymmetric",
+    "coordinates": [
+      "r",
+      "z"
+    ],
+    "frame": "laboratory",
+    "domain": "one quadrant of one drop: axis r=0, symmetry plane z=0, free surface S(t)"
+  },
+  "nondimensionalization": {
+    "length": "R_drop",
+    "time": "sqrt(rho*R_drop^3/gamma)  (inertial-capillary, t_IC)",
+    "pressure": "gamma/R_drop",
+    "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
+  },
+  "physics": {
+    "problem": "newtonian-drop-coalescence-free-surface",
+    "constitutive": "Newtonian",
+    "exterior": {
+      "kind": "passive",
+      "density": 0.0,
+      "viscosity": 0.0,
+      "pressure": "constant datum"
+    },
+    "inertia": true,
+    "Oh": 0.6,
+    "inverse_Oh": 1.666666666667,
+    "initial_bridge": {
+      "R0": 0.001,
+      "Z0": 0.0001,
+      "surface": "[r-(R0+Z0)]^2 + z^2 = Z0^2  (Eq. 2)",
+      "approximate_point_contact": false
+    },
+    "initial_velocity": "quiescent"
+  },
+  "tolerances": {
+    "newton": 1e-09,
+    "time_adaptive_target": 1e-06
+  },
+  "mesh": {
+    "characteristic_size": 0.05,
+    "remeshing": true,
+    "remesh_rule": "remesh whenever R_min has grown by a factor of 4 (Anthony 2020, Sec. II.B.2)",
+    "bridge_region": "ellipse of Eq. 6: z1=R_min (R_min<1/2), r2=2*R_min, slope tan(pi/3) at axis, 0 at plane; lagged one step",
+    "smallest_scale_to_resolve": "curvature radius ~ R_min^3"
+  },
+  "output": {
+    "write_states": true,
+    "diagnostics": [
+      "R_min(t)",
+      "Z_b = z(r=1.05 R_min)",
+      "u_min = u(r=R_min)",
+      "|2H| at neck",
+      "interface profile",
+      "V_bod (back-of-drop axial velocity)",
+      "t_con by power-law extrapolation"
+    ],
+    "cadence": 0.05,
+    "cadence_unit": "decades of R_min (log10) between diagnostic records; states also written at every remesh",
+    "cadence_rule": "every remesh and every decade of R_min"
+  },
+  "completion": {
+    "kind": "event",
+    "value": "R_min >= 0.5 or reconnection detected",
+    "note": "stop when the bridge reaches half the drop radius, or on reconnection (Duchemin et al. 2003), which the ALE algorithm cannot continue past"
+  },
+  "provenance": {
+    "tier": "T2",
+    "reproduces": "Fig. 5, Fig. 6",
+    "note": "Finite-gap bridge. Linear (Taylor-Culick) regime must end at R_c=(2 Z0)^0.5 = 1.414e-02; Z0=1e-4 reproduces Paulsen et al. 2012."
+  }
+}

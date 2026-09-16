@@ -5,3 +5,8 @@ __pycache__/
 *.dump
 *.ppm
 *.mp4
+.venv-pyoomph/
+.pyoomph-builds/
+.pyoomph-pin.json
+.pyoomph-environment.lock
+runs/
