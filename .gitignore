@@ -2,10 +2,10 @@
 __pycache__/
 *.pyc
 .venv/
+.venv*
 *.dump
 *.ppm
 *.mp4
-.venv-pyoomph/
 .pyoomph-builds/
 .pyoomph-pin.json
 .pyoomph-environment.lock
