@@ -41,4 +41,5 @@ quadrant of one drop. The pyoomph version is pinned in `pyproject.toml` and
 
 ## Status
 
-Scaffold. Case matrix written; no solver code and no results yet.
+Newtonian problem class and Anthony 2020 case matrix are in place. Results are
+not stored in this repository.
