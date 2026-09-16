@@ -1,0 +1,17 @@
+[project]
+name = "coalescence-non-newtonian"
+version = "0.0.1"
+description = "Sharp-interface ALE finite-element simulations of drop coalescence in Newtonian and non-Newtonian media (pyoomph)."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "CoMPhy Lab, Durham University" }]
+dependencies = [
+    "pyoomph",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pyoomph = { git = "https://github.com/comphy-lab/pyoomph", rev = "a186e07e1a7ea6b74ecc4f3a3fc39cc763d41618" }

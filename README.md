@@ -1,41 +1,44 @@
-# Coalescence of non-Newtonian drops
+# Coalescence in non-Newtonian media
 
-Direct numerical simulation of the coalescence of viscoelastic drops, developed
-as a controlled physical proxy for the fusion of biomolecular condensates.
+Sharp-interface, arbitrary Lagrangian–Eulerian finite-element simulations of
+drop coalescence, built on [pyoomph](https://github.com/pyoomph/pyoomph), for
+Newtonian, viscoelastic and yield-stress liquids.
 
-## Why this repository exists
+## Problem
 
-Condensate material properties are routinely inferred from a fusion movie. Two
-droplets are brought into contact, the neck is tracked, and the relaxation is
-fitted to a viscocapillary law to return an inverse capillary velocity. That
-inversion assumes a Newtonian drop with time-independent properties. Condensates
-are neither. They are viscoelastic, they age, and they sit in a dilute phase that
-is itself not a passive gas.
+When two drops touch, a microscopic bridge forms and grows under a diverging
+capillary pressure. For Newtonian drops in a passive gas the regimes of that
+growth are settled: coalescence begins in a Stokes regime and, at low Ohnesorge
+number, crosses over to an inviscid regime at a bridge radius that scales
+linearly with Oh (Anthony, Harris & Basaran, *Phys. Rev. Fluids* **5**, 033608,
+2020). Once the liquid carries elasticity, a yield stress, or both, the neck
+law, the regime map and the existence of a fully coalesced final state are
+open questions. This repository holds the solver and the case record used to
+study them.
 
-The scientific target is therefore not another neck-growth law. It is what a
-fusion measurement can and cannot determine once the drop has memory, once that
-memory evolves during the event, and once the exterior phase carries stress of
-its own.
+The configuration is a proper free surface: the exterior has zero density and
+zero viscosity and exerts only a constant pressure, so the interior rheology
+is the only physics beyond the Newtonian reference.
 
-## Scope
+## Contents
 
-Planned, in order.
+- `cases/anthony2020/` — Newtonian reference cases reproducing the regimes and
+  the Stokes-to-inviscid crossover of Anthony, Harris & Basaran (2020). See
+  the README there for the case matrix and pass conditions.
+- `problems/` — problem-class definitions, one module per physical problem.
+- `runners/`, `postprocess/` — runner adapters; neck diagnostics, similarity
+  collapse, regime fits.
+- `tests/`, `verification/`, `validation/` — software tests, equation
+  verification, comparison with published data.
+- `docs/` — documentation.
 
-1. Reproduce the established Newtonian coalescence regimes against published
-   high-resolution benchmarks, and state the resolution at which the initial
-   Stokes regime is recovered.
-2. Map neck growth across Deborah number, including the strongly elastic limit,
-   rather than a small set of relaxation times at fixed material properties.
-3. Add a viscoelastic exterior phase, the configuration relevant to a condensate
-   in a crowded dilute phase.
-4. Allow the constitutive state to evolve during the event, which is the
-   mechanical content of ageing.
-5. Treat the inverse problem explicitly. Given a synthetic neck trace degraded to
-   realistic imaging resolution and noise, establish which material parameters
-   are recoverable and which are not.
+## Method
+
+pyoomph: Galerkin finite elements on a moving, remeshed mesh, fully implicit
+in time. Axisymmetric free surface with surface tension; by symmetry, one
+quadrant of one drop. The pyoomph version is pinned in `pyproject.toml` and
+`uv.lock` so that any result can be traced to an exact solver commit.
 
 ## Status
 
-Scaffold. No solver, no cases and no results yet. Background, prior art and the
-detailed problem statement are held in the project context repository and are not
-mirrored here.
+Scaffold. Case matrix written; no solver code and no results yet.
