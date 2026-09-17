@@ -259,6 +259,7 @@ class CoalescenceProblem(Problem):
         self._last_profile_log10 = None
         self._last_neck_t = None
         self._dump_fields = False
+        self.strict_output_diagnostics = False
 
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
@@ -444,7 +445,8 @@ class CoalescenceProblem(Problem):
             try:
                 self.write_neck_row()
             except Exception:
-                pass
+                if self.strict_output_diagnostics:
+                    raise
 
     def run_until(self, *, max_time: float, startstep: float, maxstep: float) -> None:
         self.initialise()

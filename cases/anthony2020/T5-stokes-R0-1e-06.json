@@ -1,6 +1,6 @@
 {
   "schema": "pyoomph-case-v1",
-  "case_id": "T5-Oh0.6-R0-1e-06",
+  "case_id": "T5-stokes-R0-1e-06",
   "geometry": {
     "kind": "axisymmetric",
     "coordinates": [
@@ -12,7 +12,7 @@
   },
   "nondimensionalization": {
     "length": "R_drop",
-    "time": "sqrt(rho*R_drop^3/gamma)  (inertial-capillary, t_IC)",
+    "time": "mu*R_drop/gamma  (viscocapillary, t_VC; density does not enter)",
     "pressure": "gamma/R_drop",
     "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
   },
@@ -25,9 +25,9 @@
       "viscosity": 0.0,
       "pressure": "constant datum"
     },
-    "inertia": true,
-    "Oh": 0.6,
-    "inverse_Oh": 1.666666666667,
+    "inertia": false,
+    "Oh": null,
+    "inverse_Oh": 0.0,
     "initial_bridge": {
       "R0": 1e-06,
       "Z0": 5e-13,
@@ -99,7 +99,7 @@
   },
   "provenance": {
     "tier": "T5",
-    "reproduces": "Fig. 3 Oh=0.6 curve at R0=1e-6",
+    "reproduces": "Fig. 3 Stokes curve at R0=1e-6",
     "note": "Exact published initial bridge: Z0=R0^2/2=5.0e-13. Mesh counts are reconstructed and require convergence."
   }
 }

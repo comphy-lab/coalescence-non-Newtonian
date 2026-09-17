@@ -12,6 +12,9 @@ The evaluator is useful in two places:
   invalidates the old live nodes.
 * :func:`compare_remesh` turns two snapshots into a small, executable receipt
   with volume, interface, Jacobian, divergence and flux gates.
+* :func:`calibrate_remesh_baseline` records an accepted pre-remesh residual
+  scale for real Taylor--Hood states.  It is explicit and persisted with a
+  binding signature; omitting it retains the strict manufactured gates.
 
 Coordinates are ``(r,z)`` in an axisymmetric meridian.  Bulk C2 elements use
 the pyoomph row-major node order ``[SW,S,SE,W,C,E,NW,N,NE]`` and local
@@ -23,7 +26,7 @@ tests, but the runtime remesh path requires nine-node bulk elements.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Any
 
@@ -1293,6 +1296,251 @@ class RemeshGateThresholds:
                 raise ValueError(f"{name} threshold must be finite and non-negative")
 
 
+def _snapshot_signature(snapshot: "MeshDiagnostics") -> tuple[Any, ...]:
+    """Return a compact exact signature for safe baseline reuse.
+
+    The signature is intentionally made from direct receipt data, rather than
+    object identity, so an explicitly serialised baseline can be restored and
+    checked.  It includes the geometry summary, divergence norms and boundary
+    fluxes; a calibration therefore cannot silently be applied to a different
+    accepted state with a different residual scale.
+    """
+    interface_signature: tuple[Any, ...] | None = None
+    if snapshot.interface is not None:
+        interface_signature = (
+            snapshot.interface.neck,
+            snapshot.interface.pole,
+            tuple(
+                (segment.start, segment.midpoint, segment.end)
+                for segment in snapshot.interface.segments
+            ),
+        )
+    flux_signature = tuple(
+        (
+            name,
+            tuple(sorted(receipt.flux_by_slot.items())),
+        )
+        for name, receipt in sorted(snapshot.boundary_fluxes.items())
+    )
+    return (
+        snapshot.element_count,
+        snapshot.node_count,
+        tuple(sorted(snapshot.volume_by_slot.items())),
+        tuple(sorted(snapshot.minimum_physical_jacobian_by_slot.items())),
+        tuple(sorted(snapshot.minimum_scaled_jacobian_by_slot.items())),
+        tuple(sorted(snapshot.maximum_condition_number_by_slot.items())),
+        tuple(sorted(snapshot.minimum_radius_by_slot.items())),
+        interface_signature,
+        tuple(sorted(snapshot.divergence.l2_by_slot.items())),
+        tuple(sorted(snapshot.divergence.rms_by_slot.items())),
+        flux_signature,
+    )
+
+
+def _signature_to_json(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_signature_to_json(item) for item in value]
+    if isinstance(value, list):
+        return [_signature_to_json(item) for item in value]
+    return value
+
+
+def _signature_from_json(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_signature_from_json(item) for item in value)
+    return value
+
+
+def _signatures_close(first: Any, second: Any, ulps: int) -> bool:
+    """Compare persisted floating receipts without hiding a material change."""
+    if isinstance(first, float) and isinstance(second, float):
+        if first == second:
+            return True
+        if not (math.isfinite(first) and math.isfinite(second)):
+            return False
+        return abs(first - second) <= ulps * max(math.ulp(first), math.ulp(second))
+    if isinstance(first, tuple) and isinstance(second, tuple):
+        return len(first) == len(second) and all(
+            _signatures_close(a, b, ulps) for a, b in zip(first, second)
+        )
+    return first == second
+
+
+@dataclass(frozen=True)
+class RemeshBaselineCalibration:
+    """Explicit residual-scale calibration from an accepted pre-remesh state.
+
+    This policy is opt-in.  With no calibration, :func:`compare_remesh` keeps
+    the strict absolute manufactured-solution gates.  With a calibration, the
+    baseline divergence is allowed to persist and grow only by the declared
+    relative fraction; the absolute threshold remains an additive floor.  The
+    same rule is applied per boundary and value-history slot to flux changes.
+    """
+
+    baseline_divergence_by_slot: Mapping[int, float]
+    baseline_flux_by_boundary_and_slot: Mapping[str, Mapping[int, float]]
+    relative_divergence_growth: float = 0.25
+    relative_divergence_correction: float = 0.25
+    relative_flux_change: float = 0.25
+    baseline_signature: tuple[Any, ...] = ()
+    signature_tolerance_ulps: int = 64
+    source: str = "first-accepted-pre-remesh"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "relative_divergence_growth",
+            "relative_divergence_correction",
+            "relative_flux_change",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if (
+            isinstance(self.signature_tolerance_ulps, bool)
+            or not isinstance(self.signature_tolerance_ulps, int)
+            or self.signature_tolerance_ulps < 0
+        ):
+            raise ValueError("signature_tolerance_ulps must be a non-negative integer")
+        for slot, value in self.baseline_divergence_by_slot.items():
+            if int(slot) != slot or int(slot) < 0 or not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError("baseline divergence values must be finite and non-negative")
+        for name, values in self.baseline_flux_by_boundary_and_slot.items():
+            for slot, value in values.items():
+                if int(slot) != slot or int(slot) < 0 or not math.isfinite(float(value)):
+                    raise ValueError(f"baseline flux {name!r} contains an invalid history value")
+
+    @classmethod
+    def from_snapshot(cls, snapshot: "MeshDiagnostics", **kwargs: Any) -> "RemeshBaselineCalibration":
+        """Calibrate relative residual gates from one immutable snapshot."""
+        if not isinstance(snapshot, MeshDiagnostics):
+            raise TypeError("baseline calibration requires a MeshDiagnostics snapshot")
+        return cls(
+            baseline_divergence_by_slot=dict(snapshot.divergence.l2_by_slot),
+            baseline_flux_by_boundary_and_slot={
+                name: dict(receipt.flux_by_slot)
+                for name, receipt in snapshot.boundary_fluxes.items()
+            },
+            baseline_signature=_snapshot_signature(snapshot),
+            **kwargs,
+        )
+
+    def matches(self, snapshot: "MeshDiagnostics") -> bool:
+        """Return whether this policy binds to this state within restart ulps."""
+        return bool(self.baseline_signature) and _signatures_close(
+            self.baseline_signature,
+            _snapshot_signature(snapshot),
+            self.signature_tolerance_ulps,
+        )
+
+    @property
+    def baseline_relative_divergence_tolerance(self) -> float:
+        return self.relative_divergence_growth
+
+    @property
+    def relative_divergence(self) -> float:
+        return self.relative_divergence_growth
+
+    @property
+    def relative_divergence_correction_tolerance(self) -> float:
+        return self.relative_divergence_correction
+
+    @property
+    def baseline_relative_flux_tolerance(self) -> float:
+        return self.relative_flux_change
+
+    @property
+    def relative_flux_tolerance(self) -> float:
+        return self.relative_flux_change
+
+    validate = matches
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible persisted calibration payload."""
+        return {
+            "schema": "remesh-baseline-calibration-v1",
+            "baseline_divergence_by_slot": {
+                str(slot): float(value)
+                for slot, value in self.baseline_divergence_by_slot.items()
+            },
+            "baseline_flux_by_boundary_and_slot": {
+                name: {str(slot): float(value) for slot, value in values.items()}
+                for name, values in self.baseline_flux_by_boundary_and_slot.items()
+            },
+            "relative_divergence_growth": self.relative_divergence_growth,
+            "relative_divergence_correction": self.relative_divergence_correction,
+            "relative_flux_change": self.relative_flux_change,
+            "baseline_signature": _signature_to_json(self.baseline_signature),
+            "signature_tolerance_ulps": self.signature_tolerance_ulps,
+            "source": self.source,
+        }
+
+    to_dict = as_dict
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "RemeshBaselineCalibration":
+        """Restore a payload and retain strict baseline binding."""
+        if payload.get("schema") != "remesh-baseline-calibration-v1":
+            raise ValueError("unsupported remesh baseline calibration schema")
+        divergence = {
+            int(slot): float(value)
+            for slot, value in dict(payload["baseline_divergence_by_slot"]).items()
+        }
+        flux = {
+            str(name): {int(slot): float(value) for slot, value in dict(values).items()}
+            for name, values in dict(payload["baseline_flux_by_boundary_and_slot"]).items()
+        }
+        return cls(
+            baseline_divergence_by_slot=divergence,
+            baseline_flux_by_boundary_and_slot=flux,
+            relative_divergence_growth=float(payload["relative_divergence_growth"]),
+            relative_divergence_correction=float(payload["relative_divergence_correction"]),
+            relative_flux_change=float(payload["relative_flux_change"]),
+            baseline_signature=_signature_from_json(payload["baseline_signature"]),
+            signature_tolerance_ulps=int(payload.get("signature_tolerance_ulps", 64)),
+            source=str(payload.get("source", "first-accepted-pre-remesh")),
+        )
+
+    from_payload = from_dict
+
+
+def calibrate_remesh_baseline(
+    snapshot: "MeshDiagnostics",
+    *,
+    relative_divergence_growth: float = 0.25,
+    relative_divergence_correction: float = 0.25,
+    relative_flux_change: float = 0.25,
+    signature_tolerance_ulps: int = 64,
+    divergence_relative_tolerance: float | None = None,
+    divergence_correction_relative_tolerance: float | None = None,
+    flux_relative_tolerance: float | None = None,
+) -> RemeshBaselineCalibration:
+    """Create an explicit first-accepted-state calibration policy.
+
+    The 25% defaults are deliberately a bounded allowance, not a replacement
+    for solver quality.  Callers can choose a tighter allowance after recording
+    a real residual receipt.  Manufactured zero-divergence baselines continue
+    to use the absolute floors because their baseline scale is zero.
+    """
+    if divergence_relative_tolerance is not None:
+        relative_divergence_growth = float(divergence_relative_tolerance)
+    if divergence_correction_relative_tolerance is not None:
+        relative_divergence_correction = float(divergence_correction_relative_tolerance)
+    if flux_relative_tolerance is not None:
+        relative_flux_change = float(flux_relative_tolerance)
+    return RemeshBaselineCalibration.from_snapshot(
+        snapshot,
+        relative_divergence_growth=relative_divergence_growth,
+        relative_divergence_correction=relative_divergence_correction,
+        relative_flux_change=relative_flux_change,
+        signature_tolerance_ulps=signature_tolerance_ulps,
+    )
+
+
+# Names used by callers that describe the same explicit calibration step.
+calibrate_real_state = calibrate_remesh_baseline
+calibrate_baseline = calibrate_remesh_baseline
+
+
 @dataclass(frozen=True)
 class RemeshReceipt:
     """Executable before/after receipt and named gate outcomes."""
@@ -1314,6 +1562,15 @@ class RemeshReceipt:
     failures: tuple[str, ...]
     thresholds: RemeshGateThresholds
     passed: bool
+    calibration: RemeshBaselineCalibration | None = None
+    calibration_matches: bool = True
+    baseline_relative_used: bool = False
+    divergence_limit_by_slot: Mapping[int, float] = field(default_factory=dict)
+    divergence_correction_limit_by_slot: Mapping[int, float] = field(default_factory=dict)
+    divergence_relative_change_by_slot: Mapping[int, float] = field(default_factory=dict)
+    flux_relative_change_by_boundary_and_slot: Mapping[str, Mapping[int, float]] = field(
+        default_factory=dict
+    )
 
     @classmethod
     def from_meshes(cls, before: Any, after: Any, **kwargs: Any) -> "RemeshReceipt":
@@ -1388,6 +1645,26 @@ class RemeshReceipt:
     def field_correction(self) -> float:
         return self.divergence_correction
 
+    @property
+    def divergence_gate_mode(self) -> str:
+        return "baseline-relative" if self.baseline_relative_used else "absolute-manufactured"
+
+    @property
+    def calibration_active(self) -> bool:
+        return self.baseline_relative_used
+
+    @property
+    def absolute_manufactured_gates_active(self) -> bool:
+        return not self.baseline_relative_used
+
+    @property
+    def divergence_relative_change(self) -> Mapping[int, float]:
+        return self.divergence_relative_change_by_slot
+
+    @property
+    def flux_relative_change(self) -> Mapping[str, Mapping[int, float]]:
+        return self.flux_relative_change_by_boundary_and_slot
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly machine-readable receipt."""
         return {
@@ -1403,6 +1680,35 @@ class RemeshReceipt:
             "divergence_after_by_slot": dict(self.divergence_after_by_slot),
             "divergence_norm_change_by_slot": dict(self.divergence_norm_change_by_slot),
             "divergence_correction_by_slot": dict(self.divergence_correction_by_slot),
+            "divergence_relative_change_by_slot": dict(self.divergence_relative_change_by_slot),
+            "divergence_limit_by_slot": dict(self.divergence_limit_by_slot),
+            "divergence_correction_limit_by_slot": dict(self.divergence_correction_limit_by_slot),
+            "divergence_gate_mode": self.divergence_gate_mode,
+            "calibration_matches": self.calibration_matches,
+            "baseline_relative_used": self.baseline_relative_used,
+            "absolute_manufactured_gates_active": self.absolute_manufactured_gates_active,
+            "calibration_relative_divergence_growth": (
+                None
+                if self.calibration is None
+                else self.calibration.relative_divergence_growth
+            ),
+            "calibration_relative_divergence_correction": (
+                None
+                if self.calibration is None
+                else self.calibration.relative_divergence_correction
+            ),
+            "calibration_relative_flux_change": (
+                None
+                if self.calibration is None
+                else self.calibration.relative_flux_change
+            ),
+            "calibration": (
+                None if self.calibration is None else self.calibration.as_dict()
+            ),
+            "flux_relative_change_by_boundary_and_slot": {
+                name: dict(values)
+                for name, values in self.flux_relative_change_by_boundary_and_slot.items()
+            },
             "flux_change_by_boundary_and_slot": {
                 name: dict(values) for name, values in self.flux_change_by_boundary_and_slot.items()
             },
@@ -1447,6 +1753,9 @@ def compare_remesh(
     after: MeshDiagnostics | Any,
     *,
     thresholds: RemeshGateThresholds | Mapping[str, float] | None = None,
+    calibration: RemeshBaselineCalibration | None = None,
+    baseline: RemeshBaselineCalibration | None = None,
+    real_state_calibration: RemeshBaselineCalibration | None = None,
     before_interface_mesh: Any | None = None,
     after_interface_mesh: Any | None = None,
     interface_before: Any | None = None,
@@ -1467,6 +1776,33 @@ def compare_remesh(
     first = _coerce_snapshot(before, **first_kwargs)
     second = _coerce_snapshot(after, **second_kwargs)
     limits = _coerce_thresholds(thresholds)
+    supplied_calibrations = tuple(
+        item
+        for item in (calibration, baseline, real_state_calibration)
+        if item is not None
+    )
+    if len(supplied_calibrations) > 1 and any(
+        item != supplied_calibrations[0] for item in supplied_calibrations[1:]
+    ):
+        raise ValueError("provide at most one distinct remesh baseline calibration")
+    selected_calibration = supplied_calibrations[0] if supplied_calibrations else None
+    if selected_calibration is not None and not isinstance(
+        selected_calibration, RemeshBaselineCalibration
+    ):
+        raise TypeError("calibration must be a RemeshBaselineCalibration")
+    calibration_matches = selected_calibration is None
+    if selected_calibration is not None and selected_calibration.matches(first):
+        flux_slots_available = all(
+            name in second.boundary_fluxes
+            and set(values) <= set(second.boundary_fluxes[name].flux_by_slot)
+            for name, values in selected_calibration.baseline_flux_by_boundary_and_slot.items()
+        )
+        calibration_matches = (
+            set(selected_calibration.baseline_divergence_by_slot)
+            <= set(second.divergence.l2_by_slot)
+            and flux_slots_available
+        )
+    baseline_relative_used = selected_calibration is not None and calibration_matches
     slots = tuple(sorted(set(first.volume_by_slot) & set(second.volume_by_slot)))
     if not slots:
         raise ValueError("before/after snapshots have no common position history slots")
@@ -1493,6 +1829,33 @@ def compare_remesh(
         for slot in divergence_slots
     }
     divergence_correction = dict(divergence_change)
+    divergence_relative_change = {
+        slot: divergence_change[slot]
+        / max(abs(first.divergence.l2_by_slot[slot]), limits.absolute_divergence)
+        for slot in divergence_slots
+    }
+    if baseline_relative_used:
+        baseline_divergence = selected_calibration.baseline_divergence_by_slot
+        divergence_limits = {
+            slot: limits.absolute_divergence
+            + abs(baseline_divergence.get(slot, first.divergence.l2_by_slot[slot]))
+            * (1.0 + selected_calibration.relative_divergence_growth)
+            for slot in divergence_slots
+        }
+        divergence_correction_limits = {
+            slot: limits.absolute_divergence_correction
+            + abs(baseline_divergence.get(slot, first.divergence.l2_by_slot[slot]))
+            * selected_calibration.relative_divergence_correction
+            for slot in divergence_slots
+        }
+    else:
+        divergence_limits = {
+            slot: limits.absolute_divergence for slot in divergence_slots
+        }
+        divergence_correction_limits = {
+            slot: limits.absolute_divergence_correction
+            for slot in divergence_slots
+        }
     maximum_divergence_after = max(divergence_after.values(), default=0.0)
     maximum_divergence_correction = max(divergence_correction.values(), default=0.0)
 
@@ -1504,15 +1867,34 @@ def compare_remesh(
             slot: abs(second.boundary_fluxes[name].flux_by_slot[slot] - first.boundary_fluxes[name].flux_by_slot[slot])
             for slot in sorted(common)
         }
+    flux_relative_changes: dict[str, dict[int, float]] = {}
+    flux_change_limits: dict[str, dict[int, float]] = {}
+    for name, changes in flux_changes.items():
+        flux_relative_changes[name] = {}
+        flux_change_limits[name] = {}
+        for slot, change in changes.items():
+            before_flux = first.boundary_fluxes[name].flux_by_slot[slot]
+            flux_relative_changes[name][slot] = change / max(
+                abs(before_flux), limits.absolute_flux_change
+            )
+            if baseline_relative_used:
+                baseline_flux = selected_calibration.baseline_flux_by_boundary_and_slot.get(
+                    name, {}
+                ).get(slot, before_flux)
+                flux_change_limits[name][slot] = (
+                    limits.absolute_flux_change
+                    + selected_calibration.relative_flux_change * abs(baseline_flux)
+                )
+            else:
+                # Preserve the original strict manufactured/default rule when
+                # no explicit real-state calibration is supplied.
+                flux_change_limits[name][slot] = limits.absolute_flux_change + limits.relative_flux_change * max(
+                    1.0, abs(before_flux)
+                )
     maximum_flux_change = max((value for changes in flux_changes.values() for value in changes.values()), default=0.0)
-    maximum_flux_scale = max(
-        (abs(first.boundary_fluxes[name].flux_by_slot[slot])
-         for name in boundary_names
-         for slot in set(first.boundary_fluxes[name].flux_by_slot) & set(second.boundary_fluxes[name].flux_by_slot)),
-        default=0.0,
-    )
 
     gates: dict[str, bool] = {
+        "calibration": calibration_matches,
         "volume": maximum_volume <= limits.relative_volume,
         "jacobian": (
             all(value > 0.0 for value in second.minimum_physical_jacobian_by_slot.values())
@@ -1525,10 +1907,37 @@ def compare_remesh(
         ),
         "neck": interface is None or relative_neck <= limits.relative_neck,
         "pole": interface is None or relative_pole <= limits.relative_pole,
-        "divergence": maximum_divergence_after <= limits.absolute_divergence,
-        "divergence_correction": maximum_divergence_correction <= limits.absolute_divergence_correction,
-        "flux": maximum_flux_change <= limits.absolute_flux_change
-        + limits.relative_flux_change * max(1.0, maximum_flux_scale),
+        "divergence": all(
+            divergence_after[slot] <= divergence_limits[slot]
+            for slot in divergence_slots
+        ),
+        "divergence_correction": all(
+            divergence_correction[slot] <= divergence_correction_limits[slot]
+            for slot in divergence_slots
+        ),
+        "flux": all(
+            change <= flux_change_limits[name][slot]
+            for name, changes in flux_changes.items()
+            for slot, change in changes.items()
+        ),
+        # These named views make the selected policy explicit in a machine
+        # receipt.  They are informational duplicates of the active gates, so
+        # they do not add another failure mode.
+        "baseline_relative_divergence": (
+            not baseline_relative_used
+            or all(
+                divergence_after[slot] <= divergence_limits[slot]
+                for slot in divergence_slots
+            )
+        ),
+        "baseline_relative_flux": (
+            not baseline_relative_used
+            or all(
+                change <= flux_change_limits[name][slot]
+                for name, changes in flux_changes.items()
+                for slot, change in changes.items()
+            )
+        ),
     }
     failures = tuple(name for name, passed in gates.items() if not passed)
     return RemeshReceipt(
@@ -1549,6 +1958,13 @@ def compare_remesh(
         failures=failures,
         thresholds=limits,
         passed=not failures,
+        calibration=selected_calibration,
+        calibration_matches=calibration_matches,
+        baseline_relative_used=baseline_relative_used,
+        divergence_limit_by_slot=divergence_limits,
+        divergence_correction_limit_by_slot=divergence_correction_limits,
+        divergence_relative_change_by_slot=divergence_relative_change,
+        flux_relative_change_by_boundary_and_slot=flux_relative_changes,
     )
 
 
@@ -1580,6 +1996,8 @@ measure_axisymmetric_volume = axisymmetric_volume
 RemapDiagnostics = MeshDiagnostics
 BeforeAfterRemeshReceipt = RemeshReceipt
 RemeshGateReceipt = RemeshReceipt
+BaselineCalibration = RemeshBaselineCalibration
+RemeshCalibration = RemeshBaselineCalibration
 
 
 __all__ = [
@@ -1596,6 +2014,9 @@ __all__ = [
     "BoundaryFluxMetrics",
     "MeshDiagnostics",
     "RemeshGateThresholds",
+    "RemeshBaselineCalibration",
+    "BaselineCalibration",
+    "RemeshCalibration",
     "RemeshReceipt",
     "q2_basis",
     "q2_basis_derivative",
@@ -1623,6 +2044,9 @@ __all__ = [
     "capture_remap_diagnostics",
     "evaluate_mesh_diagnostics",
     "compare_remesh",
+    "calibrate_remesh_baseline",
+    "calibrate_real_state",
+    "calibrate_baseline",
     "remesh_diagnostics",
     "build_remesh_receipt",
     "build_before_after_receipt",
