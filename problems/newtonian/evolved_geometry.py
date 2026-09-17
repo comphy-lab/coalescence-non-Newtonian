@@ -107,6 +107,13 @@ class OrientedQ2Segment:
             d0 * self.start[1] + dm * self.midpoint[1] + d1 * self.end[1],
         )
 
+    def second_derivative(self) -> Point:
+        """Return the constant second derivative of this Q2 segment."""
+        return (
+            4.0 * self.start[0] - 8.0 * self.midpoint[0] + 4.0 * self.end[0],
+            4.0 * self.start[1] - 8.0 * self.midpoint[1] + 4.0 * self.end[1],
+        )
+
     def arclength(self) -> float:
         """Return the segment arclength by fixed eighth-order Gauss quadrature."""
         return 0.5 * math.fsum(
@@ -224,6 +231,30 @@ class PiecewiseQ2Curve:
 
     def reversed(self) -> PiecewiseQ2Curve:
         return PiecewiseQ2Curve(tuple(segment.reversed() for segment in reversed(self.segments)))
+
+
+def axisymmetric_twice_mean_curvature_at_start(
+    curve: PiecewiseQ2Curve,
+) -> float:
+    """Return ``k_m + k_phi`` at the neck of a neck-to-pole Q2 chain.
+
+    For tangent ``(dr,dz)``, the outward meridional normal is
+    ``(dz,-dr)/|t|``.  This fixes both curvature signs independently of the
+    interface element's native orientation.
+    """
+    segment = curve.segments[0]
+    radius = segment.start[0]
+    dr, dz = segment.derivative(0.0)
+    d2r, d2z = segment.second_derivative()
+    speed = math.hypot(dr, dz)
+    if radius <= 0.0 or speed <= 0.0:
+        raise ValueError("axisymmetric neck curvature requires positive radius and speed")
+    meridional = (d2r * dz - d2z * dr) / speed**3
+    hoop = (dz / speed) / radius
+    result = meridional + hoop
+    if not math.isfinite(result):
+        raise ValueError("axisymmetric neck curvature is non-finite")
+    return result
 
 
 @dataclass(frozen=True)
@@ -403,6 +434,7 @@ __all__ = [
     "PiecewiseQ2Curve",
     "ReconstructionError",
     "build_evolved_four_patch_graph",
+    "axisymmetric_twice_mean_curvature_at_start",
     "find_unique_eq6_intersection",
     "reconstruction_error",
 ]

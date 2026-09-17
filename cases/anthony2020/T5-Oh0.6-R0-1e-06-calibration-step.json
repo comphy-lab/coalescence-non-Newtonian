@@ -1,12 +1,9 @@
 {
   "schema": "pyoomph-case-v1",
-  "case_id": "T5-Oh0.6-R0-1e-06",
+  "case_id": "T5-Oh0.6-R0-1e-06-calibration-step",
   "geometry": {
     "kind": "axisymmetric",
-    "coordinates": [
-      "r",
-      "z"
-    ],
+    "coordinates": ["r", "z"],
     "frame": "laboratory",
     "domain": "one quadrant of one drop: axis r=0, symmetry plane z=0, free surface S(t)"
   },
@@ -91,15 +88,15 @@
   },
   "completion": {
     "kind": "event",
-    "value": "R_min >= 0.03",
-    "observable": "R_min",
+    "value": "accepted_steps >= 1",
+    "observable": "accepted_steps",
     "operator": ">=",
-    "threshold": 0.03,
-    "note": "Fig. 3 validation endpoint: Eggers' Stokes prediction quoted by Anthony et al. is valid for R_min < 0.03; max_time is the independent safety endpoint"
+    "threshold": 1,
+    "note": "Operational gate: one accepted physical timestep, live remesh calibration, immutable checkpoint and progress receipt; max_time remains the safety endpoint"
   },
   "provenance": {
-    "tier": "T5",
-    "reproduces": "Fig. 3 Oh=0.6 curve at R0=1e-6",
-    "note": "Exact published initial bridge: Z0=R0^2/2=5.0e-13. Mesh counts are reconstructed and require convergence."
+    "tier": "T5-calibration",
+    "reproduces": "Pre-remesh operational gate for Fig. 3 Oh=0.6 case",
+    "note": "Same exact published initial bridge and level-8 pilot mesh as T5 Oh=0.6; this case stops successfully after one accepted physical timestep and is not a Fig. 3 validation trajectory."
   }
 }

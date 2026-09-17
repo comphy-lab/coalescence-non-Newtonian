@@ -194,6 +194,9 @@ class AnthonyMappedQuadMesh(MeshedMeshTemplate):
         self._restart_graph: StructuredQ2Graph | None = None
         self.remesh_rmin_baseline = self.R0
         self.remesh_abs2h_baseline: float | None = None
+        self.automatic_remesh_calibration_payload: dict[str, Any] | None = None
+        self.automatic_remesh_accepted_marker: dict[str, Any] | None = None
+        self.automatic_remesh_events = 0
         self._restart_slot_one: tuple[tuple[NodeKey, tuple[float, ...], tuple[float, ...]], ...] | None = None
 
     def prepare_remesh_graph(self, graph: StructuredQ2Graph) -> None:
@@ -311,6 +314,13 @@ class AnthonyMappedQuadMesh(MeshedMeshTemplate):
             ]
             payload["remesh_rmin_baseline"] = float(self.remesh_rmin_baseline)
             payload["remesh_abs2h_baseline"] = self.remesh_abs2h_baseline
+            payload["automatic_remesh_calibration"] = (
+                self.automatic_remesh_calibration_payload
+            )
+            payload["automatic_remesh_accepted_marker"] = (
+                self.automatic_remesh_accepted_marker
+            )
+            payload["automatic_remesh_events"] = int(self.automatic_remesh_events)
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":"), allow_nan=False
             )
@@ -329,6 +339,13 @@ class AnthonyMappedQuadMesh(MeshedMeshTemplate):
         self.remesh_abs2h_baseline = (
             None if stored_abs2h is None else float(stored_abs2h)
         )
+        self.automatic_remesh_calibration_payload = payload.get(
+            "automatic_remesh_calibration"
+        )
+        self.automatic_remesh_accepted_marker = payload.get(
+            "automatic_remesh_accepted_marker"
+        )
+        self.automatic_remesh_events = int(payload.get("automatic_remesh_events", 0))
         self._restart_slot_one = tuple(
             (
                 tuple(int(value) for value in key),
@@ -354,6 +371,13 @@ class AnthonyMappedQuadMesh(MeshedMeshTemplate):
         replacement._restart_graph = stored_graph
         replacement.remesh_rmin_baseline = self.remesh_rmin_baseline
         replacement.remesh_abs2h_baseline = self.remesh_abs2h_baseline
+        replacement.automatic_remesh_calibration_payload = (
+            self.automatic_remesh_calibration_payload
+        )
+        replacement.automatic_remesh_accepted_marker = (
+            self.automatic_remesh_accepted_marker
+        )
+        replacement.automatic_remesh_events = self.automatic_remesh_events
         replacement._restart_slot_one = self._restart_slot_one
         replacement.remesher = self.remesher
         if replacement.remesher is not None:

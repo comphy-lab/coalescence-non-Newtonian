@@ -33,6 +33,22 @@ def main() -> int:
         json.dumps(case, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     with CoalescenceProblem(case, args.outdir) as problem:
+        completion = case.get("completion", {})
+        structured_completion = any(
+            key in completion for key in ("observable", "operator", "threshold")
+        )
+        if structured_completion and (
+            completion.get("observable") != "R_min"
+            or completion.get("operator") != ">="
+            or "threshold" not in completion
+        ):
+            raise ValueError(f"unsupported structured completion: {completion!r}")
+        if structured_completion:
+            problem.stop_rmin = float(completion["threshold"])
+        elif completion and not (
+            completion.get("kind") == "event" and "value" in completion
+        ):
+            raise ValueError(f"unsupported legacy completion: {completion!r}")
         if args.mesh_only:
             problem.initialise()
             row = problem.write_neck_row(profile=True)
