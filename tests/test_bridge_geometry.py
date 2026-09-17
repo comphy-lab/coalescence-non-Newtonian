@@ -18,11 +18,18 @@ from problems.newtonian.geometry import (
     eq6_conic_coeffs,
     eq6_conic_slope,
     eq6_conic_value,
+    eq6_ellipse_parameters,
+    eq6_ellipse_point,
+    eq6_ellipse_slope,
+    eq6_interface_hit,
     eq6_ellipse_points,
     eq6_plane_point,
+    eq2_bridge_value,
     point_in_initial_drop,
     sphere_bridge_junction,
     sphere_centre,
+    sphere_centre_offset,
+    sphere_value,
     viscocapillary_velocity_slope,
 )
 
@@ -52,6 +59,23 @@ class BridgeGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(r * r + (z - z_c) ** 2, 1.0, places=12)
         self.assertAlmostEqual(z_c, 1.0, places=12)
 
+    def test_centre_offset_is_retained_below_unit_ulp(self) -> None:
+        r0, z0 = 1e-6, 5e-13
+        offset = sphere_centre_offset(r0, z0)
+        self.assertTrue(math.isfinite(offset))
+        self.assertAlmostEqual(offset, 0.5 * r0**3, delta=2e-19)
+        # The centre coordinate itself may round to one, but the explicit
+        # offset used by the inverse sphere formulas must remain nonzero.
+        self.assertEqual(sphere_centre(r0, z0)[1], 1.0)
+
+    def test_free_surface_is_continuous_at_tangent_junction(self) -> None:
+        for r0 in (1e-3, 1e-4, 1e-6):
+            z0 = approximate_point_contact_z0(r0)
+            rj, zj = sphere_bridge_junction(r0, z0)
+            self.assertAlmostEqual(r_free_surface(zj, r0, z0), rj, delta=2e-14)
+            self.assertAlmostEqual(eq2_bridge_value(rj, zj, r0, z0), 0.0, delta=2e-24)
+            self.assertAlmostEqual(sphere_value(rj, zj, r0, z0), 0.0, delta=2e-15)
+
     def test_eggers_small_tau(self) -> None:
         tau = 1e-4
         rmin = eggers_stokes_rmin(tau)
@@ -77,11 +101,35 @@ class Eq6EllipseTests(unittest.TestCase):
         self.assertEqual((r2, z2), (2.0 * rmin, 0.0))
         self.assertAlmostEqual(eq6_conic_value(r1, z1, coeffs), 0.0, places=12)
         self.assertAlmostEqual(eq6_conic_value(r2, z2, coeffs), 0.0, places=12)
-        self.assertAlmostEqual(eq6_conic_slope(r1, z1, coeffs), -EQ6_AXIS_SLOPE, places=10)
+        self.assertAlmostEqual(eq6_conic_slope(r1, z1, coeffs), EQ6_AXIS_SLOPE, places=10)
         self.assertAlmostEqual(eq6_conic_slope(r2, z2, coeffs), 0.0, places=10)
         a, b, c, _, _ = coeffs
         disc = b * b - 4.0 * a * c
         self.assertLess(disc, 0.0)
+
+    def test_declared_ellipse_parameters(self) -> None:
+        for rmin in (1e-3, 1e-4, 1e-6, 0.18, 0.5):
+            p = eq6_ellipse_parameters(rmin)
+            self.assertAlmostEqual(p.c, 4.0 * rmin**2 / (4.0 * rmin + p.m * p.H))
+            self.assertAlmostEqual(p.a, 2.0 * rmin - p.c)
+            self.assertAlmostEqual(p.b2, p.H * p.a**2 / (p.m * p.c))
+            self.assertAlmostEqual(eq6_ellipse_slope(rmin, 0.0), p.m, places=10)
+            self.assertEqual(eq6_ellipse_point(rmin, 0.0), eq6_axis_point(rmin))
+            self.assertEqual(eq6_ellipse_point(rmin, 1.0), eq6_plane_point(rmin))
+
+    def test_beta_is_rejected(self) -> None:
+        self.assertIsNone(EQ6_BETA)
+        with self.assertRaises(ValueError):
+            eq6_conic_coeffs(0.18, beta=-0.9)
+
+    def test_interface_hit_is_resolved_analytically(self) -> None:
+        for r0 in (1e-3, 1e-4, 1e-6):
+            z0 = approximate_point_contact_z0(r0)
+            t, (r, z) = eq6_interface_hit(r0, r0, z0)
+            self.assertGreater(t, 0.0)
+            self.assertLess(t, 1.0)
+            self.assertAlmostEqual(eq6_conic_value(r, z, eq6_conic_coeffs(r0)), 0.0, delta=2e-12)
+            self.assertAlmostEqual(r, r_free_surface(z, r0, z0), delta=2e-14)
 
     def test_eq6_t0_clip_hits_free_surface_inside_ellipse_scale(self) -> None:
         r0, z0 = 1e-3, 5e-7
@@ -100,9 +148,6 @@ class Eq6EllipseTests(unittest.TestCase):
             for r, z in eq6_ellipse_points(rmin, n=24):
                 self.assertGreaterEqual(r, -1e-12)
                 self.assertGreaterEqual(z, -1e-12)
-
-    def test_beta_is_the_plump_member(self) -> None:
-        self.assertAlmostEqual(EQ6_BETA, -0.9)
 
     def test_eq6_polyline_clip_stays_in_bridge_region(self) -> None:
         r0, z0 = 1e-3, 5e-7
