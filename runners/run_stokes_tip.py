@@ -25,11 +25,12 @@ def main() -> int:
     ap.add_argument("--dt-fraction", type=float, default=0.02)
     ap.add_argument("--dt-initial", type=float, default=1e-9)
     ap.add_argument("--remesh-growth", type=float, default=1.5)
-    ap.add_argument("--newton-tol", type=float, default=1e-7)
+    ap.add_argument("--newton-tol", type=float, default=None, help="default 1e-7*(5e-7/Z0): the max-residual roundoff floor scales with the initial capillary pressure 1/Z0")
     ap.add_argument("--r-stop", type=float, default=0.03)
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
+    ap.add_argument("--h-tip-floor", type=float, default=1e-11)
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -55,6 +56,7 @@ def main() -> int:
     }
     (args.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
 
+    newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"]))
     pb = StokesTipCoalescence(
         R0=float(bridge["R0"]),
         Z0=float(bridge["Z0"]),
@@ -65,9 +67,10 @@ def main() -> int:
         dt_fraction=args.dt_fraction,
         dt_initial=args.dt_initial,
         remesh_growth=args.remesh_growth,
-        newton_tolerance=args.newton_tol,
+        newton_tolerance=newton_tol,
         R_stop=args.r_stop,
         neck_stretch=not args.no_neck_stretch,
+        h_tip_floor=args.h_tip_floor,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
