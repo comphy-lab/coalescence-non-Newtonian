@@ -29,6 +29,7 @@ def main() -> int:
     ap.add_argument("--r-stop", type=float, default=0.03)
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
+    ap.add_argument("--no-neck-stretch", action="store_true")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -66,6 +67,7 @@ def main() -> int:
         remesh_growth=args.remesh_growth,
         newton_tolerance=args.newton_tol,
         R_stop=args.r_stop,
+        neck_stretch=not args.no_neck_stretch,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
