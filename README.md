@@ -43,3 +43,11 @@ quadrant of one drop. The pyoomph version is pinned in `pyproject.toml` and
 
 Newtonian problem class and Anthony 2020 case matrix are in place. Results are
 not stored in this repository.
+
+## Abandoned lines
+
+- `experiment/anthony-fig3-f9b408b` (tag `abandoned/anthony-fig3-f9b408b-2026-09-20`):
+  structured four-block Q2 chart with a lagged Eq. 6 divider constraint on an
+  unreleased pyoomph fork. Closed on 20 September 2026 without an accepted
+  trajectory; retained, locked, as the audit trail for its archived
+  diagnostics. Do not merge into `main`.
