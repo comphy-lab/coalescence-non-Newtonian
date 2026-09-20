@@ -36,10 +36,16 @@ from pyoomph import *
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
 from pyoomph.equations.generic import (
     AxisymmetryBC,
+    EnforcedBC,
+    GlobalLagrangeMultiplier,
+    InitialCondition,
     IntegralObservables,
     RemeshWhen,
     RemeshingOptions,
+    ScalarField,
+    WeakContribution,
 )
+from pyoomph.expressions import cartesian, dot, exp, vector
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
 from .geometry import sphere_bridge_junction, sphere_centre
@@ -199,6 +205,8 @@ class StokesTipCoalescence(Problem):
         smooth_half_window: int = 3,
         smooth_tip_span: float = 200.0,
         detect_inversions: bool = False,
+        neck_stretch: bool = True,
+        tip_translation_span: float = 0.3,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -220,6 +228,9 @@ class StokesTipCoalescence(Problem):
         self.smooth_half_window = int(smooth_half_window)
         self.smooth_tip_span = float(smooth_tip_span)
         self.detect_inversions = bool(detect_inversions)
+        self.neck_stretch = bool(neck_stretch)
+        self.tip_translation_span = float(tip_translation_span)
+        self._R_ref = None
 
         self.output_root = Path(output_dir)
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -271,6 +282,37 @@ class StokesTipCoalescence(Problem):
         eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
         eqs += NavierStokesFreeSurface(surface_tension=1.0) @ "interface"
+        if self.neck_stretch:
+            # Make the mesh translate with the neck.  A global unknown R_neck equals the
+            # neck node's radial position (point constraint at the interface/plane corner,
+            # admissible because the corner sits at r=R_min, not on the axis).  Along the
+            # symmetry plane the nodes stretch affinely with it, x = X R_neck/R_ref, where
+            # X is the Lagrangian coordinate and R_ref the neck radius at the last remesh.
+            # The stretch multiplier is pinned at the corner itself, where the condition
+            # would duplicate the point constraint.
+            self._R_ref = self.define_global_parameter(R_ref=self.R0)
+            self.add_equations(
+                (GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)) @ "globals"
+            )
+            Rn = var("R_neck", domain="globals")
+            eqs += EnforcedBC(mesh_x=var("mesh_x") - var("lagrangian_x") * Rn / self._R_ref) @ "plane"
+            eqs += DirichletBC(_lagr_enf_bc_mesh_x=0) @ "plane/interface"
+            eqs += WeakContribution(var("mesh_x") - Rn, testfunction("R_neck", domain="globals")) @ "interface/plane"
+            # Tangential motion of the interface: a radial translation by (R_neck - R_ref)
+            # decaying with Lagrangian distance from the neck over L = tip_translation_span*R_ref,
+            # imposed through a tangential Lagrange multiplier.  The normal motion stays with
+            # the kinematic condition.  Pinned at both corners where the tangent is already fixed.
+            X = var("lagrangian")
+            s2 = (X[0] - self._R_ref) ** 2 + X[1] ** 2
+            shift = (Rn - self._R_ref) * exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
+            tvec = vector(-var("normal_y"), var("normal_x"))
+            target = var("mesh") - X - vector(shift, 0)
+            iface = ScalarField("lam_t", space="C2")
+            iface += WeakContribution(var("lam_t"), dot(tvec, testfunction("mesh")), coordsys=cartesian)
+            iface += WeakContribution(dot(target, tvec), testfunction("lam_t"), coordsys=cartesian)
+            iface += DirichletBC(lam_t=0) @ "plane"
+            iface += DirichletBC(lam_t=0) @ "axis"
+            eqs += iface @ "interface"
         self.add_equations(eqs @ "drop")
 
     # ----------------------------------------------------------- geometry io
@@ -456,6 +498,8 @@ class StokesTipCoalescence(Problem):
             self.tip_radius_lagged = rho
         self.rmin_at_remesh = st["R_min"]
         self.last_rmin = st["R_min"]
+        if self._R_ref is not None:
+            self._R_ref.value = st["R_min"]
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
         super().actions_before_remeshing(active_remeshers)
