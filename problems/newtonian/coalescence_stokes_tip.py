@@ -293,38 +293,69 @@ class MappedTipMesh(GmshTemplate):
             x, y = self._inv(x, y)
         return super().add_node(x, y, z)
 
+    def _load_mesh(self, mshfilename):  # type: ignore[override]
+        super()._load_mesh(mshfilename)
+        tag = getattr(self, "_dbg_tag", None)
+        if tag:
+            numpy.save(tag, numpy.asarray(self._mesh.points))
+            self._dbg_tag = None
+
     def _read_curved_entities(self, fname):  # type: ignore[override]
         # The .geo_unrolled curves live in mapped coordinates; they must not be attached to
         # the (physical) facets.  Gmsh's own second-order nodes carry the geometry.
         self._curved_entities1d = {}
 
     # ------------------------------------------------------------- geometry
+    # A curve is a list of pieces, each an exact evaluator xi in [0, 1] -> physical point:
+    # Q2 interface elements (vertex, midside, vertex), analytic circle arcs, straight lines.
     @staticmethod
-    def _q2_subsample(poly, per_element=16):
-        """Points on the Q2 interface geometry (vertex, midside, vertex triples), exact on the
-        finite-element curve, `per_element` per element."""
-        out = [poly[0]]
+    def _q2_pieces(poly):
+        pieces = []
         for i in range(0, len(poly) - 2, 2):
             v0, m, v1 = poly[i], poly[i + 1], poly[i + 2]
-            for j in range(1, per_element + 1):
-                xi = -1.0 + 2.0 * j / per_element
-                w0, wm, w1 = 0.5 * xi * (xi - 1.0), 1.0 - xi * xi, 0.5 * xi * (xi + 1.0)
-                out.append((w0 * v0[0] + wm * m[0] + w1 * v1[0], w0 * v0[1] + wm * m[1] + w1 * v1[1]))
-        if len(poly) % 2 == 0:            # odd number of segments: last segment linear
-            out.append(poly[-1])
-        return out
 
-    def _resample(self, M, target, end_shrink=32):
-        """Points along the mapped polyline M at spacing target(p), the chords shrinking
-        geometrically (halving) towards both ends down to target/end_shrink, so that the
-        Catmull-Rom end tangents, which follow the end chords, match the curve."""
+            def ev(t, v0=v0, m=m, v1=v1):
+                xi = 2.0 * t - 1.0
+                w0, wm, w1 = 0.5 * xi * (xi - 1.0), 1.0 - xi * xi, 0.5 * xi * (xi + 1.0)
+                return (w0 * v0[0] + wm * m[0] + w1 * v1[0], w0 * v0[1] + wm * m[1] + w1 * v1[1])
+
+            pieces.append(ev)
+        if len(poly) % 2 == 0:            # odd number of segments: last one linear
+            a_, b_ = poly[-2], poly[-1]
+            pieces.append(lambda t, a_=a_, b_=b_: (a_[0] + t * (b_[0] - a_[0]), a_[1] + t * (b_[1] - a_[1])))
+        return pieces
+
+    @staticmethod
+    def _arc_piece(cx, cz, rad, a0, a1):
+        return lambda t: (cx + rad * math.cos(a0 + t * (a1 - a0)), cz + rad * math.sin(a0 + t * (a1 - a0)))
+
+    @staticmethod
+    def _line_piece(p, q):
+        return lambda t: (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
+
+    def _control_points(self, pieces, S, size_at, n_fine=24, end_shrink=32):
+        """Spline control points on the mapped image of the curve.
+
+        Each piece is sampled at n_fine parameters, mapped, and the cumulative mapped chord
+        length is used to place points at spacing size_at(p') with chords halving towards both
+        ends (Catmull-Rom end tangents follow the end chords).  Every control point is
+        evaluated exactly on the piece (the parameter is interpolated, not the position), so
+        the geometry is reproduced to roundoff whatever the fine sampling; a linearly
+        interpolated fine polyline gave a 4e-7 inward bias per remesh at R0=1e-3.
+        """
+        params, mapped = [], []
+        for ip, ev in enumerate(pieces):
+            for j in range(n_fine + (1 if ip == len(pieces) - 1 else 0)):
+                t = j / n_fine
+                x, y = ev(t)
+                params.append((ip, t))
+                mapped.append(self._fwd(x / S, y / S))
         s = [0.0]
-        for i in range(1, len(M)):
-            s.append(s[-1] + math.hypot(M[i][0] - M[i - 1][0], M[i][1] - M[i - 1][1]))
+        for i in range(1, len(mapped)):
+            s.append(s[-1] + math.hypot(mapped[i][0] - mapped[i - 1][0], mapped[i][1] - mapped[i - 1][1]))
         total = s[-1]
 
-        def at(pos):
-            # position along M at arclength pos (linear interpolation of the fine polyline)
+        def exact_at(pos):
             lo, hi = 0, len(s) - 1
             while hi - lo > 1:
                 mid = (lo + hi) // 2
@@ -333,22 +364,25 @@ class MappedTipMesh(GmshTemplate):
                 else:
                     hi = mid
             seg = s[hi] - s[lo]
-            w = 0.0 if seg <= 0 else (pos - s[lo]) / seg
-            return (M[lo][0] + w * (M[hi][0] - M[lo][0]), M[lo][1] + w * (M[hi][1] - M[lo][1]))
+            w = 0.0 if seg <= 0 else min(1.0, max(0.0, (pos - s[lo]) / seg))
+            (ip0, t0), (ip1, t1) = params[lo], params[hi]
+            if ip1 != ip0:            # fine interval crossing a piece boundary
+                t1 = 1.0
+            x, y = pieces[ip0](t0 + w * (t1 - t0))
+            return self._fwd(x / S, y / S)
 
-        out = [M[0]]
+        out = [mapped[0]]
         pos = 0.0
         while True:
-            p = out[-1]
-            tgt = target(p)
+            tgt = size_at(out[-1])
             remaining = total - pos
             step = min(tgt, max(0.5 * pos, tgt / end_shrink) if pos > 0 else tgt / end_shrink,
                        max(0.5 * remaining, tgt / end_shrink))
             if remaining <= 1.5 * tgt / end_shrink:
                 break
             pos += step
-            out.append(at(pos))
-        out.append(M[-1])
+            out.append(exact_at(pos))
+        out.append(mapped[-1])
         return out
 
     def define_geometry(self):
@@ -371,29 +405,32 @@ class MappedTipMesh(GmshTemplate):
             _, zc = sphere_centre(r0, z0)
             jr, jz = sphere_bridge_junction(r0, z0)
             z_pole = zc + 1.0
-
-            def h_phys(x, y):
-                return min(pb.h_max, max(h_tip_phys, k * math.hypot(x - r0, y)))
-
-            fine = []
-            ang, a_j = math.pi, math.atan2(jz, jr - (r0 + z0))
+            a_j = math.atan2(jz, jr - (r0 + z0))
+            # Meniscus arc from the tip (angle pi) to the junction, then the sphere to the pole,
+            # each split into pieces of roughly equal physical grading so the fine sampling
+            # resolves the geometric grading near the tip.
+            pieces = []
+            ang = math.pi
             while ang > a_j:
                 x, y = r0 + z0 + z0 * math.cos(ang), z0 * math.sin(ang)
-                fine.append((x, y))
-                ang -= 0.02 * h_phys(x, y) / z0
+                da = 0.5 * min(pb.h_max, max(h_tip_phys, k * math.hypot(x - r0, y))) / z0
+                a_next = max(a_j, ang - da)
+                pieces.append(self._arc_piece(r0 + z0, 0.0, z0, ang, a_next))
+                ang = a_next
             ang = math.atan2(jz - zc, jr)
             while ang < math.pi / 2:
                 x, y = math.cos(ang), zc + math.sin(ang)
-                fine.append((x, y))
-                ang += 0.02 * h_phys(x, y)
-            fine.append((0.0, z_pole))
+                da = 0.5 * min(pb.h_max, max(h_tip_phys, k * math.hypot(x - r0, y)))
+                a_next = min(math.pi / 2, ang + da)
+                pieces.append(self._arc_piece(0.0, zc, 1.0, ang, a_next))
+                ang = a_next
             kind = "initial"
         else:
             poly = pb.interface_polyline()
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
-            fine = self._q2_subsample(poly)
-            fine[-1] = (0.0, z_pole)
+            poly[-1] = (0.0, z_pole)
+            pieces = self._q2_pieces(poly)
             kind = "remesh"
         T = r_neck
         r_neck_phys = r_neck * S
@@ -409,16 +446,24 @@ class MappedTipMesh(GmshTemplate):
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
-        iface_p = self._resample([self._fwd(x / S, y / S) for (x, y) in fine], lambda p: f_ctrl * size_mapped(p))
+        iface_p = self._control_points(pieces, S, lambda p: f_ctrl * size_mapped(p))
         # Axis r = 0 from the pole to the origin: straight physically, curved in the map.
-        fine_axis = []
+        axis_pieces = []
         z = z_pole
         while z > 0.0:
-            fine_axis.append((0.0, z))
-            z -= 0.02 * min(pb.h_max, max(h_tip_phys, k * math.hypot(r_neck_phys, z)))
-        fine_axis.append((0.0, 0.0))
-        axis_p = self._resample([self._fwd(0.0, zz / S) for (_, zz) in fine_axis], lambda p: f_ctrl * size_mapped(p))
+            dz = 0.5 * min(pb.h_max, max(h_tip_phys, k * math.hypot(r_neck_phys, z)))
+            z_next = max(0.0, z - dz)
+            axis_pieces.append(self._line_piece((0.0, z), (0.0, z_next)))
+            z = z_next
+        axis_p = self._control_points(axis_pieces, S, lambda p: f_ctrl * size_mapped(p))
+        fine = []
 
+        import os
+        dbg = os.environ.get("LA0_MAP_DEBUG")
+        if dbg:
+            numpy.save(f"{dbg}/ctrl_iface_{pb.n_remesh:03d}.npy", numpy.array(iface_p))
+            numpy.save(f"{dbg}/ctrl_axis_{pb.n_remesh:03d}.npy", numpy.array(axis_p))
+            self._dbg_tag = f"{dbg}/nodes_{pb.n_remesh:03d}.npy"
         self.default_resolution = h_max
         self.set_gmsh_parameter("General.NumThreads", 1)
         self.set_gmsh_parameter("Geometry.Tolerance", 1e-15)
@@ -495,6 +540,7 @@ class StokesTipCoalescence(Problem):
         max_bisect_levels: int = 5,
         tip_map_alpha: float = 0.0,
         tip_map_control_fraction: float = 0.25,
+        tip_fit_window: float = 0.3,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -544,6 +590,8 @@ class StokesTipCoalescence(Problem):
         # size; Gmsh's geo spline is a uniform-parameter Catmull-Rom, whose interpolation error
         # on a unit-curvature curve is ~1e-5 at 0.25*0.2 chords and ~1e-9 at 0.25*0.02.
         self.tip_map_control_fraction = float(tip_map_control_fraction)
+        # Circle-fit window for the tip radius, in lagged tip radii.
+        self.tip_fit_window = float(tip_fit_window)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
@@ -768,9 +816,13 @@ class StokesTipCoalescence(Problem):
         # element size at the tip varies between remeshes.
         d2 = (r - p0[0]) ** 2 + (z - p0[1]) ** 2
         order = sorted(range(n), key=lambda i: d2[i])
-        # Seven nearest Q2 nodes: three elements, about 0.2 tip radii of arc at n_tip=16.
-        # Local enough to be the tip, averaged enough not to flip with the element size.
-        near = order[: min(7, n)]
+        # Nodes within tip_fit_window lagged tip radii of the neck, at least seven.  A fixed
+        # count of nearest nodes is not scale-aware: on the mapped mesh the seven nearest
+        # nodes span a thousandth of a tip radius and the fit returns noise (run 36).
+        win = self.tip_fit_window * self.tip_radius_lagged
+        near = [i for i in order if d2[i] <= win * win]
+        if len(near) < 7:
+            near = order[: min(7, n)]
         p1 = (float(r[order[1]]), float(z[order[1]]))
         circ = fit_circle_kasa([(float(r[i]), float(z[i])) for i in near])
         if circ is None:
