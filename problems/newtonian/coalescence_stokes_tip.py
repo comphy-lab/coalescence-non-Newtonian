@@ -429,10 +429,16 @@ class StokesTipCoalescence(Problem):
             # The tip itself is carried by the circle arc; beyond it the spline only needs
             # Gmsh-floor resolution, and pyoomph's spline parameter inversion fails on
             # segments much shorter than the floor ("Cannot invert spline").
-            min_gap = 2.0 * self.gmsh_floor
+            # Geometrically graded sampling (spacing ~ k * distance from the neck, floored at
+            # twice the Gmsh floor): abrupt spacing jumps between bisected and Gmsh-sized
+            # nodes make the Catmull-Rom spline wiggly and pyoomph's Gauss-Newton parameter
+            # inversion then fails ("Cannot invert spline").
+            r_t, z_t = pts[0]
             kept = [pts[0]]
             for q in pts[1:-1]:
-                if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= min_gap:
+                d_tip = math.hypot(q[0] - r_t, q[1] - z_t)
+                gap = max(2.0 * self.gmsh_floor, self.grading * d_tip)
+                if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= gap:
                     kept.append(q)
             kept.append(pts[-1])
             pts = kept
