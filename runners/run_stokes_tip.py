@@ -33,6 +33,7 @@ def main() -> int:
     ap.add_argument("--h-tip-floor", type=float, default=1e-11)
     ap.add_argument("--tip-refine", action="store_true", help="quads + oomph-lib bisection below the Gmsh floor")
     ap.add_argument("--gmsh-floor", type=float, default=1e-11)
+    ap.add_argument("--bisect-floor", type=float, default=2e-13)
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -77,6 +78,7 @@ def main() -> int:
         h_tip_floor=args.h_tip_floor,
         tip_refine=args.tip_refine,
         gmsh_floor=args.gmsh_floor,
+        bisect_floor=args.bisect_floor,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)

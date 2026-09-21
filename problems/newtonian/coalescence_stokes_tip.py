@@ -221,6 +221,7 @@ class StokesTipCoalescence(Problem):
         gmsh_floor: float = 1e-11,
         refine_span: float = 40.0,
         max_refine_rounds: int = 6,
+        bisect_floor: float = 2e-13,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -248,6 +249,10 @@ class StokesTipCoalescence(Problem):
         self.gmsh_floor = float(gmsh_floor)
         self.refine_span = float(refine_span)
         self.max_refine_rounds = int(max_refine_rounds)
+        # Absolute element-size floor for bisection.  Below ~1e-13 in a unit domain the
+        # assembled system loses too many digits and Newton diverges at any step size
+        # (R0=1e-4 dev runs: marginal at 1.5e-13, fatal at 3.7e-14).
+        self.bisect_floor = float(bisect_floor)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._R_ref = None
@@ -546,7 +551,7 @@ class StokesTipCoalescence(Problem):
             rho = st["tip_radius"]
             if not (math.isfinite(rho) and rho > 0):
                 break
-            target = rho / self.n_tip
+            target = max(rho / self.n_tip, self.bisect_floor)
             r0, z0 = st["R_min"], 0.0
             idx = []
             for i, e in enumerate(mesh.elements()):
@@ -741,7 +746,7 @@ class StokesTipCoalescence(Problem):
             if max_wall_s is not None and time.time() - self._wall0 > max_wall_s:
                 status = "wall_limit"
                 break
-            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * st["tip_radius"] / self.n_tip):
+            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * max(st["tip_radius"] / self.n_tip, self.bisect_floor)):
                 self._needs_tip_refine = False
                 if self.refine_tip():
                     st = self.neck_state()
