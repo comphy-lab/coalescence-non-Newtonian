@@ -224,6 +224,7 @@ class StokesTipCoalescence(Problem):
         max_refine_rounds: int = 6,
         bisect_floor: float = 2e-13,
         spatial_scale: float | None = None,
+        interface_translation: bool = True,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -260,6 +261,7 @@ class StokesTipCoalescence(Problem):
         # absolute-size cliff seen at R0=1e-4 out of reach.  Physical values are used
         # everywhere in this class; only Gmsh sizes and element midpoints need converting.
         self.S = float(spatial_scale) if spatial_scale else 1.0
+        self.interface_translation = bool(interface_translation)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._R_ref = None
@@ -340,6 +342,7 @@ class StokesTipCoalescence(Problem):
             # decaying with Lagrangian distance from the neck over L = tip_translation_span*R_ref,
             # imposed through a tangential Lagrange multiplier.  The normal motion stays with
             # the kinematic condition.  Pinned at both corners where the tangent is already fixed.
+        if self.neck_stretch and self.interface_translation:
             X = var("lagrangian")
             s2 = (X[0] - self._R_ref) ** 2 + X[1] ** 2
             shift = (Rn - self._R_ref) * exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
@@ -565,10 +568,22 @@ class StokesTipCoalescence(Problem):
             idx = []
             S = self.S
             for i, e in enumerate(mesh.elements()):
-                h = math.sqrt(max(e.get_current_cartesian_nondim_size(), 0.0)) * S
+                # Element size from its vertex nodes (physical units); the cached size API
+                # was observed to over-report after a remesh and drove bisection far past
+                # the floor.
+                nv = e.nvertex_node()
+                xs = [e.vertex_node_pt(k).x(0) * S for k in range(nv)]
+                ys = [e.vertex_node_pt(k).x(1) * S for k in range(nv)]
+                # sqrt of the polygon area of the vertex ring (shoelace); vertex order for a
+                # Q element is (0,1,3,2) in oomph-lib's tensor-product numbering.
+                order = (0, 1, 3, 2) if nv == 4 else tuple(range(nv))
+                area = 0.0
+                for a_, b_ in zip(order, order[1:] + order[:1]):
+                    area += xs[a_] * ys[b_] - xs[b_] * ys[a_]
+                h = math.sqrt(abs(area) * 0.5)
                 if h <= target:
                     continue
-                x, y = (c * S for c in e.get_Eulerian_midpoint()[:2])
+                x, y = sum(xs) / nv, sum(ys) / nv
                 d = math.hypot(x - r0, y - z0)
                 # Same geometric grading as the Gmsh field: an element is too coarse only if it
                 # is larger than both the tip target and k times its distance from the tip.

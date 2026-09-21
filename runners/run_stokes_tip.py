@@ -30,6 +30,7 @@ def main() -> int:
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
+    ap.add_argument("--no-interface-translation", action="store_true")
     ap.add_argument("--h-tip-floor", type=float, default=1e-11)
     ap.add_argument("--tip-refine", action="store_true", help="quads + oomph-lib bisection below the Gmsh floor")
     ap.add_argument("--gmsh-floor", type=float, default=1e-11)
@@ -80,6 +81,7 @@ def main() -> int:
         newton_tolerance=newton_tol,
         R_stop=args.r_stop,
         neck_stretch=not args.no_neck_stretch,
+        interface_translation=not args.no_interface_translation,
         h_tip_floor=args.h_tip_floor,
         tip_refine=args.tip_refine,
         gmsh_floor=args.gmsh_floor,
