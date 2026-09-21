@@ -371,6 +371,18 @@ class StokesTipCoalescence(Problem):
         n_tip_pts = min(len(pts) - 1, n_tip_pts + self.smooth_half_window)
         head = smooth_polyline_arclength(pts[: n_tip_pts + 1], self.smooth_half_window)
         pts = head + pts[n_tip_pts + 1 :]
+        if self.tip_refine:
+            # Bisected tip nodes may be far below the Gmsh floor; Gmsh's kernel and the
+            # macro-element spline inversion cannot take spacing that small in a unit
+            # domain, so thin the polyline to the floor.  The bisection pass after the
+            # remesh restores the tip resolution on the new spline.
+            min_gap = 0.5 * self.gmsh_floor
+            kept = [pts[0]]
+            for q in pts[1:-1]:
+                if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= min_gap:
+                    kept.append(q)
+            kept.append(pts[-1])
+            pts = kept
         # Exact symmetry-plane and axis end points.
         pts[0] = (pts[0][0], 0.0)
         pts[-1] = (0.0, pts[-1][1])

@@ -57,6 +57,8 @@ def main() -> int:
         "argv": sys.argv,
     }
     (args.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
+    with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
 
     newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"]))
     pb = StokesTipCoalescence(
