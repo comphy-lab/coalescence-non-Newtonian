@@ -426,7 +426,10 @@ class StokesTipCoalescence(Problem):
             # macro-element spline inversion cannot take spacing that small in a unit
             # domain, so thin the polyline to the floor.  The bisection pass after the
             # remesh restores the tip resolution on the new spline.
-            min_gap = 0.5 * self.gmsh_floor
+            # The tip itself is carried by the circle arc; beyond it the spline only needs
+            # Gmsh-floor resolution, and pyoomph's spline parameter inversion fails on
+            # segments much shorter than the floor ("Cannot invert spline").
+            min_gap = 2.0 * self.gmsh_floor
             kept = [pts[0]]
             for q in pts[1:-1]:
                 if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= min_gap:
