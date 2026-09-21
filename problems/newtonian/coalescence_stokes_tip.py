@@ -126,7 +126,7 @@ class TipGradedQuadrantMesh(GmshTemplate):
     def define_geometry(self):
         pb = self.get_problem()
         assert isinstance(pb, StokesTipCoalescence)
-        self.mesh_mode = "tris"
+        self.mesh_mode = "quads" if pb.tip_refine else "tris"
         self.order = 2
         h_tip = pb.current_h_tip()
         h_max = pb.h_max
@@ -207,6 +207,10 @@ class StokesTipCoalescence(Problem):
         detect_inversions: bool = False,
         neck_stretch: bool = True,
         tip_translation_span: float = 0.3,
+        tip_refine: bool = False,
+        gmsh_floor: float = 1e-11,
+        refine_span: float = 40.0,
+        max_refine_rounds: int = 6,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -230,6 +234,12 @@ class StokesTipCoalescence(Problem):
         self.detect_inversions = bool(detect_inversions)
         self.neck_stretch = bool(neck_stretch)
         self.tip_translation_span = float(tip_translation_span)
+        self.tip_refine = bool(tip_refine)
+        self.gmsh_floor = float(gmsh_floor)
+        self.refine_span = float(refine_span)
+        self.max_refine_rounds = int(max_refine_rounds)
+        self._needs_tip_refine = False
+        self.n_refine_events = 0
         self._R_ref = None
 
         self.output_root = Path(output_dir)
@@ -256,13 +266,16 @@ class StokesTipCoalescence(Problem):
 
     # ------------------------------------------------------------------ mesh
     def current_h_tip(self) -> float:
-        return max(self.tip_radius_lagged / self.n_tip, self.h_tip_floor)
+        floor = self.gmsh_floor if self.tip_refine else self.h_tip_floor
+        return max(self.tip_radius_lagged / self.n_tip, floor)
 
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
         self.set_output_directory(str(self.output_root / "pyoomph"))
         self.newton_solver_tolerance = self.newton_tolerance
         self.max_newton_iterations = 12
+        if self.tip_refine:
+            self.max_refinement_level = 20
         self.write_states = False
         self._template = TipGradedQuadrantMesh()
         self.add_mesh(self._template)
@@ -448,6 +461,59 @@ class StokesTipCoalescence(Problem):
             for r, z in poly:
                 fh.write(f"{r:.16e} {z:.16e}\n")
 
+    # ---------------------------------------------------------- h-refinement
+    def refine_tip(self) -> int:
+        """Bisect quads near the neck tip until their size is below rho_tip/n_tip.
+
+        Gmsh cannot produce elements much below ~1e-12 in a unit domain (its Delaunay
+        predicates are relative to the model size), so the template stops at
+        ``gmsh_floor`` and oomph-lib's quadtree refinement takes the tip further.  New
+        boundary nodes land on the macro-element geometry.  The time integrator is
+        restarted impulsively afterwards, as after a remesh.
+        """
+        if not self.tip_refine:
+            return 0
+        mesh = self.get_mesh("drop")
+        total = 0
+        for _round in range(self.max_refine_rounds):
+            st = self.neck_state()
+            rho = st["tip_radius"]
+            if not (math.isfinite(rho) and rho > 0):
+                break
+            target = rho / self.n_tip
+            r0, z0 = st["R_min"], 0.0
+            idx = []
+            for i, e in enumerate(mesh.elements()):
+                h = math.sqrt(max(e.get_current_cartesian_nondim_size(), 0.0))
+                if h <= target:
+                    continue
+                x, y = e.get_Eulerian_midpoint()[:2]
+                d = math.hypot(x - r0, y - z0)
+                # Same geometric grading as the Gmsh field: an element is too coarse only if it
+                # is larger than both the tip target and k times its distance from the tip.
+                if h > max(target, self.grading * d):
+                    idx.append(i)
+            if not idx:
+                break
+            self.actions_before_adapt()
+            mesh.refine_selected_elements(idx)
+            self.relink_external_data()
+            self.actions_after_adapt()
+            total += len(idx)
+        if total:
+            self.assign_initial_values_impulsive()
+            self.timestepper.set_num_unsteady_steps_done(0)
+            self._taken_already_an_unsteady_step = False
+            self._dt_prev = None
+            self.n_refine_events += 1
+            st = self.neck_state()
+            print(
+                f"TIP REFINE: {total} elements bisected in rounds; ndof={self.ndof()} "
+                f"h_tip_now={st['h_tip_now']:.3e} rho={st['tip_radius']:.3e}",
+                flush=True,
+            )
+        return total
+
     # -------------------------------------------------------------- predictor
     def actions_before_newton_solve(self):
         """Seed Newton with a linear extrapolation of all dofs (positions included).
@@ -515,6 +581,7 @@ class StokesTipCoalescence(Problem):
         self._taken_already_an_unsteady_step = False
         self._dt_prev = None
         self._step_at_remesh = self._steps
+        self._needs_tip_refine = True
         self.n_remesh += 1
         st_new = self.neck_state()
         st_old = getattr(self, "_pre_remesh_state", {})
@@ -560,6 +627,7 @@ class StokesTipCoalescence(Problem):
 
     def run_campaign(self, *, max_steps: int = 100000, max_wall_s: float | None = None) -> dict[str, Any]:
         self.initialise()
+        self.refine_tip()
         st = self.neck_state()
         self.write_row(st, 0.0, None)
         self.write_profile(self.interface_polyline(), st, tag="_initial")
@@ -577,6 +645,10 @@ class StokesTipCoalescence(Problem):
             if max_wall_s is not None and time.time() - self._wall0 > max_wall_s:
                 status = "wall_limit"
                 break
+            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * st["tip_radius"] / self.n_tip):
+                self._needs_tip_refine = False
+                if self.refine_tip():
+                    st = self.neck_state()
             dt = self.choose_dt(st)
             ok = False
             for _attempt in range(6):
