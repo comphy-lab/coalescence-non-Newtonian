@@ -585,6 +585,26 @@ class StokesTipCoalescence(Problem):
             )
         return total
 
+    # -------------------------------------------------------------- snapshot
+    def _dof_snapshot(self):
+        """Mesh-agnostic snapshot: time, all current values (dofs and pinned, positions
+        included).  Unlike Problem._snapshot_state it does not rebuild the mesh on restore,
+        so it survives selective bisection."""
+        t = float(self.get_current_time(dimensional=False, as_float=True))
+        dofs, _pos, pinned = self._get_all_values_at_current_time(True)
+        return t, numpy.array(dofs, copy=True), numpy.array(pinned, copy=True)
+
+    def _dof_restore(self, snap) -> None:
+        t, dofs, pinned = snap
+        self.set_all_values_at_current_time(dofs, pinned, True)
+        self.set_current_time(t, dimensional=False)
+        # A failed unsteady solve has shifted the history; restart impulsively (BDF1 step).
+        self.assign_initial_values_impulsive()
+        self.timestepper.set_num_unsteady_steps_done(0)
+        self._taken_already_an_unsteady_step = False
+        self._dt_prev = None
+        self.invalidate_cached_mesh_data()
+
     # -------------------------------------------------------------- predictor
     def actions_before_newton_solve(self):
         """Seed Newton with a linear extrapolation of all dofs (positions included).
@@ -694,8 +714,11 @@ class StokesTipCoalescence(Problem):
         dt_phys = self.dt_fraction * st["R_min"] / u
         ratio = max(self._last_curvature_ratio, 1e-12)
         factor = math.sqrt(self.curvature_change_target / ratio)
-        factor = min(self.dt_growth, max(0.5, factor))
+        growth = 2.0 if getattr(self, "_regrow", False) else self.dt_growth
+        factor = min(growth, max(0.5, factor))
         dt = min(dt_phys, self._dt * factor)
+        if dt >= 0.9 * dt_phys or factor < growth:
+            self._regrow = False
         return max(dt, self.dt_initial)
 
     def run_campaign(self, *, max_steps: int = 100000, max_wall_s: float | None = None) -> dict[str, Any]:
@@ -724,8 +747,14 @@ class StokesTipCoalescence(Problem):
                     st = self.neck_state()
             dt = self.choose_dt(st)
             ok = False
+            if self._dt_prev is None:
+                # Fresh integrator (after remesh, bisection or a rejected step): no predictor is
+                # available, so keep the first displacement within ~20 tip elements.
+                dt = min(dt, 20.0 * st["h_tip_now"] / max(abs(st["u_neck"]), 1e-3))
+                dt = max(dt, self.dt_initial)
+                self._regrow = True
             for _attempt in range(6):
-                snapshot = self._snapshot_state()
+                snapshot = self._dof_snapshot()
                 self._dt = dt
                 self._predict_now = True
                 try:
@@ -735,7 +764,7 @@ class StokesTipCoalescence(Problem):
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
                     print(f"step failed at dt={dt:.3e}: {exc!r}; restoring and reducing", flush=True)
                     self._predict_now = False
-                    self._restore_state(snapshot)
+                    self._dof_restore(snapshot)
                     dt *= 0.3
                 finally:
                     self._predict_now = False
