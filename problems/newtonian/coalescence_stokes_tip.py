@@ -437,7 +437,9 @@ class StokesTipCoalescence(Problem):
             kept = [pts[0]]
             for q in pts[1:-1]:
                 d_tip = math.hypot(q[0] - r_t, q[1] - z_t)
-                gap = max(2.0 * self.gmsh_floor, self.grading * d_tip)
+                # Node spacing of the Gmsh mesh is half the element size k*d; never thin
+                # below that, or the far interface (and the drop volume) is misrepresented.
+                gap = max(2.0 * self.gmsh_floor, 0.5 * self.grading * d_tip)
                 if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= gap:
                     kept.append(q)
             kept.append(pts[-1])
