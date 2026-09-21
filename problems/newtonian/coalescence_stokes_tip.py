@@ -229,6 +229,234 @@ class TipGradedQuadrantMesh(GmshTemplate):
         self.set_mesh_size_background_field(field)
 
 
+class MappedTipMesh(GmshTemplate):
+    """One quadrant of one drop, generated in tip-magnifying coordinates.
+
+    Gmsh cannot build elements smaller than about 1e-12 of the model size, whatever the
+    spatial scale (its Delaunay predicates are relative to the bounding box), and a
+    Catmull-Rom spline joined to a tip arc kinks once the point spacing Gmsh can honour
+    exceeds the tip radius (R0=1e-4 dev runs 26-34).  Anthony et al. avoid both by
+    generating their structured mesh in stretched coordinates.  The same idea works for an
+    unstructured mesh: every geometric input is mapped by the radial power law
+
+        x' = T + (x - T) * (d'/d),   d' = L^(1-a) d^a,   d = |x - T|,
+
+    about the neck tip T = (R_neck, 0), with 0 < a < 1 and L the drop radius.  A tip of
+    radius rho becomes rho' = rho^a (L = 1): 1e-13 -> 1.6e-8 for a = 0.6, ten thousand
+    times the Gmsh floor.  Gmsh generates an isotropic, linearly graded mesh in x' and the
+    nodes are mapped back on loading (add_node_unique), so the solver sees a physical mesh
+    whose elements are elongated radially by 1/a and whose size grows like k d towards the
+    far field, exactly as before.  Directions from T are preserved by the map, so the
+    symmetry plane z = 0 stays a straight line and the interface tangent at T stays
+    perpendicular to it; the axis r = 0 becomes a smooth curve, represented by a spline
+    through mapped samples, and its nodes return to r = 0 to spline accuracy (the axis
+    Dirichlet condition then pins them exactly).  No curved entities are registered: the
+    Gmsh second-order nodes already lie on the mapped curves, and mapping is exact.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._mapping = False
+        self._T = 0.0
+        self._alpha = 1.0
+        self._L = 1.0
+
+    # ---------------------------------------------------------------- the map
+    def _fwd(self, x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - self._T, y
+        d = math.hypot(dx, dy)
+        if d == 0.0:
+            return x, y
+        s = (self._L ** (1.0 - self._alpha)) * d ** self._alpha / d
+        return self._T + dx * s, dy * s
+
+    def _inv(self, xp: float, yp: float) -> tuple[float, float]:
+        dx, dy = xp - self._T, yp
+        dp = math.hypot(dx, dy)
+        if dp == 0.0:
+            return xp, yp
+        d = (dp / self._L ** (1.0 - self._alpha)) ** (1.0 / self._alpha)
+        s = d / dp
+        return self._T + dx * s, dy * s
+
+    def _size_mapped(self, dp: float, h_tip_p: float, k: float) -> float:
+        return max(h_tip_p, k * dp)
+
+    # Nodes arrive from the .msh file in mapped coordinates; store them physically.
+    def add_node_unique(self, x, y, z):  # type: ignore[override]
+        if self._mapping:
+            x, y = self._inv(x, y)
+        return super().add_node_unique(x, y, z)
+
+    def add_node(self, x, y, z):  # type: ignore[override]
+        if self._mapping:
+            x, y = self._inv(x, y)
+        return super().add_node(x, y, z)
+
+    def _read_curved_entities(self, fname):  # type: ignore[override]
+        # The .geo_unrolled curves live in mapped coordinates; they must not be attached to
+        # the (physical) facets.  Gmsh's own second-order nodes carry the geometry.
+        self._curved_entities1d = {}
+
+    # ------------------------------------------------------------- geometry
+    @staticmethod
+    def _q2_subsample(poly, per_element=16):
+        """Points on the Q2 interface geometry (vertex, midside, vertex triples), exact on the
+        finite-element curve, `per_element` per element."""
+        out = [poly[0]]
+        for i in range(0, len(poly) - 2, 2):
+            v0, m, v1 = poly[i], poly[i + 1], poly[i + 2]
+            for j in range(1, per_element + 1):
+                xi = -1.0 + 2.0 * j / per_element
+                w0, wm, w1 = 0.5 * xi * (xi - 1.0), 1.0 - xi * xi, 0.5 * xi * (xi + 1.0)
+                out.append((w0 * v0[0] + wm * m[0] + w1 * v1[0], w0 * v0[1] + wm * m[1] + w1 * v1[1]))
+        if len(poly) % 2 == 0:            # odd number of segments: last segment linear
+            out.append(poly[-1])
+        return out
+
+    def _resample(self, M, target, end_shrink=32):
+        """Points along the mapped polyline M at spacing target(p), the chords shrinking
+        geometrically (halving) towards both ends down to target/end_shrink, so that the
+        Catmull-Rom end tangents, which follow the end chords, match the curve."""
+        s = [0.0]
+        for i in range(1, len(M)):
+            s.append(s[-1] + math.hypot(M[i][0] - M[i - 1][0], M[i][1] - M[i - 1][1]))
+        total = s[-1]
+
+        def at(pos):
+            # position along M at arclength pos (linear interpolation of the fine polyline)
+            lo, hi = 0, len(s) - 1
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if s[mid] <= pos:
+                    lo = mid
+                else:
+                    hi = mid
+            seg = s[hi] - s[lo]
+            w = 0.0 if seg <= 0 else (pos - s[lo]) / seg
+            return (M[lo][0] + w * (M[hi][0] - M[lo][0]), M[lo][1] + w * (M[hi][1] - M[lo][1]))
+
+        out = [M[0]]
+        pos = 0.0
+        while True:
+            p = out[-1]
+            tgt = target(p)
+            remaining = total - pos
+            step = min(tgt, max(0.5 * pos, tgt / end_shrink) if pos > 0 else tgt / end_shrink,
+                       max(0.5 * remaining, tgt / end_shrink))
+            if remaining <= 1.5 * tgt / end_shrink:
+                break
+            pos += step
+            out.append(at(pos))
+        out.append(M[-1])
+        return out
+
+    def define_geometry(self):
+        pb = self.get_problem()
+        assert isinstance(pb, StokesTipCoalescence)
+        self.mesh_mode = "tris"
+        self.order = 2
+        S = pb.S
+        L = 1.0 / S                                  # drop radius in solver units
+        a = pb.tip_map_alpha
+        k = pb.grading
+        h_tip = pb.current_h_tip() / S               # physical tip element size, solver units
+        rho = max(pb.tip_radius_lagged, pb.h_tip_floor) / S
+        h_max = pb.h_max / S
+        h_tip_phys = pb.current_h_tip()
+
+        if self.is_first_time():
+            r_neck = pb.R0 / S
+            r0, z0 = pb.R0, pb.Z0
+            _, zc = sphere_centre(r0, z0)
+            jr, jz = sphere_bridge_junction(r0, z0)
+            z_pole = zc + 1.0
+
+            def h_phys(x, y):
+                return min(pb.h_max, max(h_tip_phys, k * math.hypot(x - r0, y)))
+
+            fine = []
+            ang, a_j = math.pi, math.atan2(jz, jr - (r0 + z0))
+            while ang > a_j:
+                x, y = r0 + z0 + z0 * math.cos(ang), z0 * math.sin(ang)
+                fine.append((x, y))
+                ang -= 0.02 * h_phys(x, y) / z0
+            ang = math.atan2(jz - zc, jr)
+            while ang < math.pi / 2:
+                x, y = math.cos(ang), zc + math.sin(ang)
+                fine.append((x, y))
+                ang += 0.02 * h_phys(x, y)
+            fine.append((0.0, z_pole))
+            kind = "initial"
+        else:
+            poly = pb.interface_polyline()
+            r_neck = poly[0][0] / S
+            z_pole = poly[-1][1]
+            fine = self._q2_subsample(poly)
+            fine[-1] = (0.0, z_pole)
+            kind = "remesh"
+        T = r_neck
+        r_neck_phys = r_neck * S
+
+        self._T, self._alpha, self._L = T, a, L
+        self._mapping = True
+        h_tip_p = (L ** (1.0 - a)) * (rho ** a) / pb.n_tip     # mapped tip element size
+        expo = (a - 1.0) / a
+
+        def size_mapped(p):
+            dp = math.hypot(p[0] - T, p[1])
+            cap = h_max * (max(dp, 1e-300) / L) ** expo
+            return min(cap, max(h_tip_p, k * dp))
+
+        f_ctrl = pb.tip_map_control_fraction
+        iface_p = self._resample([self._fwd(x / S, y / S) for (x, y) in fine], lambda p: f_ctrl * size_mapped(p))
+        # Axis r = 0 from the pole to the origin: straight physically, curved in the map.
+        fine_axis = []
+        z = z_pole
+        while z > 0.0:
+            fine_axis.append((0.0, z))
+            z -= 0.02 * min(pb.h_max, max(h_tip_phys, k * math.hypot(r_neck_phys, z)))
+        fine_axis.append((0.0, 0.0))
+        axis_p = self._resample([self._fwd(0.0, zz / S) for (_, zz) in fine_axis], lambda p: f_ctrl * size_mapped(p))
+
+        self.default_resolution = h_max
+        self.set_gmsh_parameter("General.NumThreads", 1)
+        self.set_gmsh_parameter("Geometry.Tolerance", 1e-15)
+        self.set_gmsh_parameter("Mesh.MeshSizeMin", h_tip_p)
+        self.set_gmsh_parameter("Mesh.MeshSizeMax", 10.0 * h_max)
+        self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", 0)
+        self.set_gmsh_parameter("Mesh.MeshSizeFromPoints", 0)
+        self.set_gmsh_parameter("Mesh.MeshSizeExtendFromBoundary", 0)
+        self.set_gmsh_parameter("Mesh.Algorithm", 6)
+
+        p_n = self.point(T, 0.0, consider_spatial_scale=False)
+        p_t = self.point(*iface_p[-1], consider_spatial_scale=False)
+        p_o = self.point(*axis_p[-1], consider_spatial_scale=False)
+        assert math.hypot(p_t.x[0] - axis_p[0][0], p_t.x[1] - axis_p[0][1]) < 1e-9 * L, "pole mismatch"
+        inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in iface_p[1:-1]]
+        interface = self.spline([p_n, *inner, p_t], name="interface", with_macro_element=False)
+        ax_inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in axis_p[1:-1]]
+        axis = self.spline([p_t, *ax_inner, p_o], name="axis", with_macro_element=False)
+        plane = self.line(p_o, p_n, name="plane")
+        self.plane_surface(plane, interface, axis, name="drop")
+
+        dist = self.add_mesh_size_field("Distance", PointsList=[p_n])
+        # Physical cap h_max expressed in mapped units: h' = h (d'/d) = h_max (d'/L)^((a-1)/a).
+        field = self.add_mesh_size_field(
+            "MathEval",
+            F=f"min({h_max!r}*(max(F{dist},1e-300)/{L!r})^({expo!r}), max({h_tip_p!r}, {k!r}*F{dist}))",
+        )
+        self.set_mesh_size_background_field(field)
+        pb._mesh_receipt = {
+            "kind": kind,
+            "h_tip": h_tip * S,
+            "h_tip_mapped": h_tip_p,
+            "r_neck": r_neck_phys,
+            "alpha": a,
+            "n_interface_points": len(iface_p),
+            "n_axis_points": len(axis_p),
+        }
+
 class StokesTipCoalescence(Problem):
     """Driver: fixed-ratio implicit stepping, tip-tracking remeshes, neck diagnostics."""
 
@@ -265,6 +493,8 @@ class StokesTipCoalescence(Problem):
         interface_translation: bool = True,
         anticipation: float = 0.5,
         max_bisect_levels: int = 5,
+        tip_map_alpha: float = 0.0,
+        tip_map_control_fraction: float = 0.25,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -307,6 +537,13 @@ class StokesTipCoalescence(Problem):
         # test (R0=1e-4 runs 21/22/24 at level 7; R0=1e-3 with a 1e-6 floor at 13 and 15);
         # five was always stable.
         self.max_bisect_levels = int(max_bisect_levels)
+        # Exponent of the tip-magnifying map used by MappedTipMesh; 0 selects the plain
+        # tip-graded template.
+        self.tip_map_alpha = float(tip_map_alpha)
+        # Spline control-point spacing in the mapped plane as a fraction of the local mesh
+        # size; Gmsh's geo spline is a uniform-parameter Catmull-Rom, whose interpolation error
+        # on a unit-curvature curve is ~1e-5 at 0.25*0.2 chords and ~1e-9 at 0.25*0.02.
+        self.tip_map_control_fraction = float(tip_map_control_fraction)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
@@ -325,7 +562,7 @@ class StokesTipCoalescence(Problem):
         self._step_at_remesh = 0
         self._mesh_receipt: dict[str, Any] = {}
         self._pending_remesh_reason: str | None = None
-        self._template: TipGradedQuadrantMesh | None = None
+        self._template: TipGradedQuadrantMesh | MappedTipMesh | None = None
         self._neck_csv = self.output_root / "neck.csv"
         self._progress_path = self.output_root / "progress.jsonl"
         self._wrote_header = False
@@ -351,7 +588,7 @@ class StokesTipCoalescence(Problem):
         if self.tip_refine:
             self.max_refinement_level = 20
         self.write_states = False
-        self._template = TipGradedQuadrantMesh()
+        self._template = MappedTipMesh() if self.tip_map_alpha > 0 else TipGradedQuadrantMesh()
         self.add_mesh(self._template)
 
         eqs = StokesEquations(dynamic_viscosity=1.0, mode="TH")

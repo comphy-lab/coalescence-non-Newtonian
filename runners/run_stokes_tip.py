@@ -36,6 +36,7 @@ def main() -> int:
     ap.add_argument("--gmsh-floor", type=float, default=1e-11)
     ap.add_argument("--bisect-floor", type=float, default=2e-13)
     ap.add_argument("--spatial-scale", type=float, default=None, help="pyoomph spatial scale; 0 or negative means R0")
+    ap.add_argument("--tip-map", type=float, default=0.0, help="exponent a of the tip-magnifying mesh map (MappedTipMesh); 0 = off, 0.6 recommended")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -87,6 +88,7 @@ def main() -> int:
         gmsh_floor=args.gmsh_floor,
         bisect_floor=args.bisect_floor,
         spatial_scale=spatial_scale,
+        tip_map_alpha=args.tip_map,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
