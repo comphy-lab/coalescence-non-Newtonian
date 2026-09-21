@@ -91,6 +91,13 @@ def fit_circle_kasa(points) -> tuple[tuple[float, float], float] | None:
         return None
     x0 = P.mean(axis=0)
     Q = P - x0  # centre the data for conditioning
+    # ... and scale it to O(1): with a 5e-13 tip on a 1e-6 neck the centred coordinates are
+    # ~1e-14 and the columns of A differ by 1e14, which lstsq's rank cut-off treats as
+    # rank deficient (R0=1e-6 run 41 read 4.3e-14 for an exactly circular 5e-13 tip).
+    scale = float(np.abs(Q).max())
+    if not (scale > 0.0) or not math.isfinite(scale):
+        return None
+    Q = Q / scale
     A = np.column_stack([2.0 * Q[:, 0], 2.0 * Q[:, 1], np.ones(len(Q))])
     b = (Q ** 2).sum(axis=1)
     try:
@@ -101,7 +108,7 @@ def fit_circle_kasa(points) -> tuple[tuple[float, float], float] | None:
     r2 = c + cx * cx + cy * cy
     if not (r2 > 0.0) or not math.isfinite(r2):
         return None
-    return (float(cx + x0[0]), float(cy + x0[1])), float(math.sqrt(r2))
+    return (float(cx * scale + x0[0]), float(cy * scale + x0[1])), float(math.sqrt(r2) * scale)
 
 
 def circle_through(p0, p1, p2) -> tuple[tuple[float, float], float] | None:
