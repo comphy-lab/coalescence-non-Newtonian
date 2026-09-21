@@ -31,6 +31,8 @@ def main() -> int:
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
     ap.add_argument("--h-tip-floor", type=float, default=1e-11)
+    ap.add_argument("--tip-refine", action="store_true", help="quads + oomph-lib bisection below the Gmsh floor")
+    ap.add_argument("--gmsh-floor", type=float, default=1e-11)
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -71,6 +73,8 @@ def main() -> int:
         R_stop=args.r_stop,
         neck_stretch=not args.no_neck_stretch,
         h_tip_floor=args.h_tip_floor,
+        tip_refine=args.tip_refine,
+        gmsh_floor=args.gmsh_floor,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
