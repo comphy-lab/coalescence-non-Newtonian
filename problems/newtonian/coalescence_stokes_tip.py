@@ -309,6 +309,7 @@ class StokesTipCoalescence(Problem):
         self.max_bisect_levels = int(max_bisect_levels)
         self._needs_tip_refine = False
         self.n_refine_events = 0
+        self._thin_boost = 1.0
         self._R_ref = None
 
         self.output_root = Path(output_dir)
@@ -449,8 +450,9 @@ class StokesTipCoalescence(Problem):
         while n_tip_pts < len(pts) - 1 and math.hypot(pts[n_tip_pts][0] - r0, pts[n_tip_pts][1] - z0) < span:
             n_tip_pts += 1
         n_tip_pts = min(len(pts) - 1, n_tip_pts + self.smooth_half_window)
-        head = smooth_polyline_arclength(pts[: n_tip_pts + 1], self.smooth_half_window)
-        pts = head + pts[n_tip_pts + 1 :]
+        if not self.tip_refine:
+            head = smooth_polyline_arclength(pts[: n_tip_pts + 1], self.smooth_half_window)
+            pts = head + pts[n_tip_pts + 1 :]
         if self.tip_refine:
             # Bisected tip nodes may be far below the Gmsh floor; Gmsh's kernel and the
             # macro-element spline inversion cannot take spacing that small in a unit
@@ -475,7 +477,7 @@ class StokesTipCoalescence(Problem):
                 if d_tip > zone:
                     kept.append(q)
                     continue
-                gap = max(4.0 * self.gmsh_floor, 0.5 * self.grading * d_tip)
+                gap = max(4.0 * self.gmsh_floor * self._thin_boost, 0.5 * self.grading * d_tip)
                 if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= gap:
                     kept.append(q)
             kept.append(pts[-1])
@@ -869,6 +871,20 @@ class StokesTipCoalescence(Problem):
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
                     print(f"step failed at dt={dt:.3e}: {exc!r}; restoring and reducing", flush=True)
                     self._predict_now = False
+                    if "Cannot invert spline" in repr(exc) and self._template is not None:
+                        # The failure is in building the NEW mesh's macro elements; the old mesh is
+                        # still the live one.  Retry the remesh with coarser tip-zone sampling.
+                        self._thin_boost *= 2.0
+                        print(f"remesh spline inversion failed; retrying remesh with thin_boost={self._thin_boost}", flush=True)
+                        try:
+                            self._dof_restore(snapshot)
+                            self.force_remesh({self._template})
+                            self._needs_tip_refine = True
+                            self.refine_tip()
+                            st = self.neck_state()
+                            continue
+                        except Exception as exc2:
+                            print(f"remesh retry failed: {exc2!r}", flush=True)
                     self._dof_restore(snapshot)
                     dt *= 0.3
                 finally:
