@@ -540,7 +540,7 @@ class StokesTipCoalescence(Problem):
         max_bisect_levels: int = 5,
         tip_map_alpha: float = 0.0,
         tip_map_control_fraction: float = 0.25,
-        tip_fit_window: float = 0.3,
+        tip_fit_angle: float = 0.15,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -590,8 +590,8 @@ class StokesTipCoalescence(Problem):
         # size; Gmsh's geo spline is a uniform-parameter Catmull-Rom, whose interpolation error
         # on a unit-curvature curve is ~1e-5 at 0.25*0.2 chords and ~1e-9 at 0.25*0.02.
         self.tip_map_control_fraction = float(tip_map_control_fraction)
-        # Circle-fit window for the tip radius, in lagged tip radii.
-        self.tip_fit_window = float(tip_fit_window)
+        # Circle-fit window for the tip radius: chord angle from the tip tangent (radians).
+        self.tip_fit_angle = float(tip_fit_angle)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
@@ -816,11 +816,18 @@ class StokesTipCoalescence(Problem):
         # element size at the tip varies between remeshes.
         d2 = (r - p0[0]) ** 2 + (z - p0[1]) ** 2
         order = sorted(range(n), key=lambda i: d2[i])
-        # Nodes within tip_fit_window lagged tip radii of the neck, at least seven.  A fixed
-        # count of nearest nodes is not scale-aware: on the mapped mesh the seven nearest
-        # nodes span a thousandth of a tip radius and the fit returns noise (run 36).
-        win = self.tip_fit_window * self.tip_radius_lagged
-        near = [i for i in order if d2[i] <= win * win]
+        # Scale-free fit window: nodes whose chord from the neck makes an angle of at most
+        # tip_fit_angle with the tip tangent (the z axis), i.e. about 2*tip_fit_angle of arc
+        # on a circle, at least seven nodes.  A fixed node count spans a thousandth of a tip
+        # radius on the mapped mesh (run 36), and a window in lagged radii collapses once the
+        # tip radius grows again as R_min^3 (run 37: 5.6e-14 read for a 1.4e-12 tip).
+        near = [i0]
+        for i in order[1:]:
+            # Walk outwards in distance and stop at the first node beyond the angle; nodes
+            # far up the drop near the axis have |r - R_min| small and must not qualify.
+            if math.atan2(abs(r[i] - p0[0]), max(z[i] - p0[1], 0.0)) > self.tip_fit_angle:
+                break
+            near.append(i)
         if len(near) < 7:
             near = order[: min(7, n)]
         p1 = (float(r[order[1]]), float(z[order[1]]))
