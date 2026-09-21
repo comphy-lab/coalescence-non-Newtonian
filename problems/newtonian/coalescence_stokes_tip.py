@@ -256,6 +256,7 @@ class StokesTipCoalescence(Problem):
         self._pending_remesh_reason: str | None = None
         self._template: TipGradedQuadrantMesh | None = None
         self._neck_csv = self.output_root / "neck.csv"
+        self._progress_path = self.output_root / "progress.jsonl"
         self._wrote_header = False
         self._last_profile_bin: int | None = None
         self._steps = 0
@@ -446,6 +447,18 @@ class StokesTipCoalescence(Problem):
                 w.writeheader()
                 self._wrote_header = True
             w.writerow({k: row[k] for k in fields})
+        with self._progress_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "physical_time": state["t"],
+                "primary_observable": state["R_min"],
+                "degrees_of_freedom": int(self.ndof()),
+                "nonlinear_iterations": newton_iters if newton_iters is not None else -1,
+                "timestep": dt,
+                "remesh_events": self.n_remesh,
+                "neck_velocity": state["u_neck"],
+                "two_H": state["two_H"],
+                "wall_s": row["wall_s"],
+            }) + "\n")
         rb = math.floor(math.log10(state["R_min"]) * 10.0)  # every 0.1 decade
         if self._last_profile_bin != rb:
             self._last_profile_bin = rb
