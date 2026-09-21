@@ -206,9 +206,11 @@ class TipGradedQuadrantMesh(GmshTemplate):
                     raise RuntimeError("tip arc nodes are collinear")
                 (cx, cz), _rf = circ
                 tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
-                interface = [tip_arc] + self._piecewise_arcs([pj] + pts[2:-1] + [(0.0, z_pole)], p_j, p_t)
+                inner = [self.point(x, y) for (x, y) in pts[2:-1]]
+                interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
             else:
-                interface = self._piecewise_arcs(pts, p_n, p_t)
+                inner = [self.point(x, y) for (x, y) in pts[1:-1]]
+                interface = [self.spline([p_n, *inner, p_t], name="interface")]
             pb._mesh_receipt = {
                 "kind": "remesh",
                 "h_tip": h_tip * S,
@@ -473,7 +475,7 @@ class StokesTipCoalescence(Problem):
                 if d_tip > zone:
                     kept.append(q)
                     continue
-                gap = max(2.0 * self.gmsh_floor, 0.5 * self.grading * d_tip)
+                gap = max(4.0 * self.gmsh_floor, 0.5 * self.grading * d_tip)
                 if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= gap:
                     kept.append(q)
             kept.append(pts[-1])
@@ -498,7 +500,7 @@ class StokesTipCoalescence(Problem):
         # Join at ~30 degrees up the meniscus (z ~ rf/2), where the profile is still
         # circular to high accuracy, and pass the arc through actual interface nodes
         # (neck, a node near 15 degrees, the join node) so the join has no tangent kink.
-        z_join = 0.5 * rf
+        z_join = 0.8 * rf
         j = next((i for i, q in enumerate(raw) if q[1] >= z_join), None)
         if j is None or j < 2:
             return pts, None
