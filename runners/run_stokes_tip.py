@@ -34,6 +34,7 @@ def main() -> int:
     ap.add_argument("--tip-refine", action="store_true", help="quads + oomph-lib bisection below the Gmsh floor")
     ap.add_argument("--gmsh-floor", type=float, default=1e-11)
     ap.add_argument("--bisect-floor", type=float, default=2e-13)
+    ap.add_argument("--spatial-scale", type=float, default=None, help="pyoomph spatial scale; 0 or negative means R0")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -61,7 +62,11 @@ def main() -> int:
     with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
 
-    newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"]))
+    spatial_scale = float(bridge["R0"]) if (args.spatial_scale is not None and args.spatial_scale <= 0) else args.spatial_scale
+    S = spatial_scale if spatial_scale else 1.0
+    # Max-residual roundoff floor: proportional to the initial capillary pressure 1/Z0 and to
+    # 1/S^2 under a pyoomph spatial scale S (measured: 2e-8 at Z0=5e-7, S=1; 0.016 at S=1e-3).
+    newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"])) / S**2
     pb = StokesTipCoalescence(
         R0=float(bridge["R0"]),
         Z0=float(bridge["Z0"]),
@@ -79,6 +84,7 @@ def main() -> int:
         tip_refine=args.tip_refine,
         gmsh_floor=args.gmsh_floor,
         bisect_floor=args.bisect_floor,
+        spatial_scale=spatial_scale,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
