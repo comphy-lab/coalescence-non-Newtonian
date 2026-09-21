@@ -123,6 +123,30 @@ def circle_through(p0, p1, p2) -> tuple[tuple[float, float], float] | None:
 class TipGradedQuadrantMesh(GmshTemplate):
     """One quadrant of one drop; triangles graded geometrically from the neck tip."""
 
+    def _chunked_splines(self, pts, p_first, p_last, ratio: float = 100.0):
+        """Catmull-Rom splines through pts (first/last given as existing Points), split so
+        that each piece spans at most ``ratio`` in segment length: pyoomph's Gauss-Newton
+        spline parameter inversion fails on a single spline spanning ten decades."""
+        curves = []
+        start_pt = p_first
+        chunk = [pts[0]]
+        seg_min = seg_max = None
+        for k in range(1, len(pts)):
+            seg = math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1])
+            lo = seg if seg_min is None else min(seg_min, seg)
+            hi = seg if seg_max is None else max(seg_max, seg)
+            if seg_min is not None and hi > ratio * lo and len(chunk) >= 3:
+                end_pt = self.point(*pts[k - 1])
+                curves.append(self.spline([start_pt, *[self.point(*q) for q in chunk[1:-1]], end_pt], name="interface"))
+                start_pt = end_pt
+                chunk = [pts[k - 1], pts[k]]
+                seg_min = seg_max = seg
+            else:
+                chunk.append(pts[k])
+                seg_min, seg_max = lo, hi
+        curves.append(self.spline([start_pt, *[self.point(*q) for q in chunk[1:-1]], p_last], name="interface"))
+        return curves
+
     def define_geometry(self):
         pb = self.get_problem()
         assert isinstance(pb, StokesTipCoalescence)
@@ -176,11 +200,9 @@ class TipGradedQuadrantMesh(GmshTemplate):
                     raise RuntimeError("tip arc nodes are collinear")
                 (cx, cz), _rf = circ
                 tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
-                inner = [self.point(x, y) for (x, y) in pts[2:-1]]
-                interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
+                interface = [tip_arc] + self._chunked_splines([pj] + pts[2:-1] + [(0.0, z_pole)], p_j, p_t)
             else:
-                inner = [self.point(x, y) for (x, y) in pts[1:-1]]
-                interface = [self.spline([p_n, *inner, p_t], name="interface")]
+                interface = self._chunked_splines(pts, p_n, p_t)
             pb._mesh_receipt = {
                 "kind": "remesh",
                 "h_tip": h_tip * S,
@@ -433,12 +455,18 @@ class StokesTipCoalescence(Problem):
             # twice the Gmsh floor): abrupt spacing jumps between bisected and Gmsh-sized
             # nodes make the Catmull-Rom spline wiggly and pyoomph's Gauss-Newton parameter
             # inversion then fails ("Cannot invert spline").
+            # Thin only the tip zone (bisected nodes), grading the spacing from twice the
+            # Gmsh floor up to the Gmsh node spacing; keep every node beyond it, or the far
+            # interface and the drop volume are misrepresented (run28: 0.5% volume loss).
             r_t, z_t = pts[0]
+            h_g = self.current_h_tip()
+            zone = h_g / self.grading * 4.0   # where Gmsh's graded field takes over
             kept = [pts[0]]
             for q in pts[1:-1]:
                 d_tip = math.hypot(q[0] - r_t, q[1] - z_t)
-                # Node spacing of the Gmsh mesh is half the element size k*d; never thin
-                # below that, or the far interface (and the drop volume) is misrepresented.
+                if d_tip > zone:
+                    kept.append(q)
+                    continue
                 gap = max(2.0 * self.gmsh_floor, 0.5 * self.grading * d_tip)
                 if math.hypot(q[0] - kept[-1][0], q[1] - kept[-1][1]) >= gap:
                     kept.append(q)
