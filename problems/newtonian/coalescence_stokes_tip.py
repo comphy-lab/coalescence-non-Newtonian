@@ -128,8 +128,9 @@ class TipGradedQuadrantMesh(GmshTemplate):
         assert isinstance(pb, StokesTipCoalescence)
         self.mesh_mode = "quads" if pb.tip_refine else "tris"
         self.order = 2
-        h_tip = pb.current_h_tip()
-        h_max = pb.h_max
+        S = pb.S
+        h_tip = pb.current_h_tip() / S   # Gmsh works in solver (scaled) units
+        h_max = pb.h_max / S
         k = pb.grading
         self.default_resolution = h_max
         self.set_gmsh_parameter("General.NumThreads", 1)
@@ -152,7 +153,7 @@ class TipGradedQuadrantMesh(GmshTemplate):
             meniscus = self.circle_arc(p_n, p_j, center=(r0 + z0, 0.0), name="interface")
             sphere = self.circle_arc(p_j, p_t, center=(0.0, zc), name="interface")
             interface = [meniscus, sphere]
-            pb._mesh_receipt = {"kind": "initial", "h_tip": h_tip, "r_neck": r0}
+            pb._mesh_receipt = {"kind": "initial", "h_tip": h_tip * S, "r_neck": r0}
         else:
             pts, arc = pb.interface_polyline_for_remesh()
             r_neck = pts[0][0]
@@ -174,7 +175,7 @@ class TipGradedQuadrantMesh(GmshTemplate):
                 interface = [self.spline([p_n, *inner, p_t], name="interface")]
             pb._mesh_receipt = {
                 "kind": "remesh",
-                "h_tip": h_tip,
+                "h_tip": h_tip * S,
                 "r_neck": r_neck,
                 "n_interface_points": len(pts),
             }
@@ -222,6 +223,7 @@ class StokesTipCoalescence(Problem):
         refine_span: float = 40.0,
         max_refine_rounds: int = 6,
         bisect_floor: float = 2e-13,
+        spatial_scale: float | None = None,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -253,6 +255,11 @@ class StokesTipCoalescence(Problem):
         # assembled system loses too many digits and Newton diverges at any step size
         # (R0=1e-4 dev runs: marginal at 1.5e-13, fatal at 3.7e-14).
         self.bisect_floor = float(bisect_floor)
+        # pyoomph spatial scale: the solver stores coordinates as r/S.  With S = R0 the
+        # tip elements are O(1e-9) in solver units instead of O(1e-13), which moves the
+        # absolute-size cliff seen at R0=1e-4 out of reach.  Physical values are used
+        # everywhere in this class; only Gmsh sizes and element midpoints need converting.
+        self.S = float(spatial_scale) if spatial_scale else 1.0
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._R_ref = None
@@ -287,6 +294,8 @@ class StokesTipCoalescence(Problem):
 
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
+        if self.S != 1.0:
+            self.set_scaling(spatial=self.S)
         self.set_output_directory(str(self.output_root / "pyoomph"))
         self.newton_solver_tolerance = self.newton_tolerance
         self.max_newton_iterations = 12
@@ -348,7 +357,7 @@ class StokesTipCoalescence(Problem):
     def _interface_nodes(self):
         from pyoomph.meshes.meshdatacache import MeshDataCache
 
-        data = MeshDataCache(tesselate_tri=False, nondimensional=True).get_data(
+        data = MeshDataCache(tesselate_tri=False, nondimensional=False).get_data(
             self.get_mesh("drop/interface")
         )
         r = data.get_data("coordinate_x")
@@ -554,11 +563,12 @@ class StokesTipCoalescence(Problem):
             target = max(rho / self.n_tip, self.bisect_floor)
             r0, z0 = st["R_min"], 0.0
             idx = []
+            S = self.S
             for i, e in enumerate(mesh.elements()):
-                h = math.sqrt(max(e.get_current_cartesian_nondim_size(), 0.0))
+                h = math.sqrt(max(e.get_current_cartesian_nondim_size(), 0.0)) * S
                 if h <= target:
                     continue
-                x, y = e.get_Eulerian_midpoint()[:2]
+                x, y = (c * S for c in e.get_Eulerian_midpoint()[:2])
                 d = math.hypot(x - r0, y - z0)
                 # Same geometric grading as the Gmsh field: an element is too coarse only if it
                 # is larger than both the tip target and k times its distance from the tip.
