@@ -154,14 +154,24 @@ class TipGradedQuadrantMesh(GmshTemplate):
             interface = [meniscus, sphere]
             pb._mesh_receipt = {"kind": "initial", "h_tip": h_tip, "r_neck": r0}
         else:
-            pts = pb.interface_polyline_for_remesh()
+            pts, arc = pb.interface_polyline_for_remesh()
             r_neck = pts[0][0]
             z_pole = pts[-1][1]
             p_o = self.point(0.0, 0.0)
             p_n = self.point(r_neck, 0.0)
             p_t = self.point(0.0, z_pole)
-            inner = [self.point(x, y) for (x, y) in pts[1:-1]]
-            interface = [self.spline([p_n, *inner, p_t], name="interface")]
+            if arc is not None:
+                # Tip as an exact circle arc (fitted radius); the bisection pass refines
+                # along the true circle through the macro element, so the tip survives
+                # a remesh even when it is far below the Gmsh floor.
+                (cx, cz), _rho_fit, pj = arc
+                p_j = self.point(pj[0], pj[1])
+                tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
+                inner = [self.point(x, y) for (x, y) in pts[1:-1]]
+                interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
+            else:
+                inner = [self.point(x, y) for (x, y) in pts[1:-1]]
+                interface = [self.spline([p_n, *inner, p_t], name="interface")]
             pb._mesh_receipt = {
                 "kind": "remesh",
                 "h_tip": h_tip,
@@ -357,7 +367,14 @@ class StokesTipCoalescence(Problem):
                 out.append(p)
         return out
 
-    def interface_polyline_for_remesh(self) -> list[tuple[float, float]]:
+    def interface_polyline_for_remesh(self):
+        """Return (points, arc) for the remesh geometry.
+
+        ``arc`` is None for the plain spline route.  With tip bisection it is
+        ``((cx, cz), rho, p_join)``: a least-squares circle through the interface nodes
+        within one tip radius of the neck and the join point (projected onto that
+        circle) where the spline takes over; ``points`` then start at ``p_join``.
+        """
         pts = self.interface_polyline()
         if len(pts) < 4:
             raise RuntimeError("interface polyline too short for remeshing")
@@ -388,7 +405,31 @@ class StokesTipCoalescence(Problem):
         pts[-1] = (0.0, pts[-1][1])
         if pts[0][1] != 0.0 or pts[-1][0] != 0.0 or pts[0][0] <= 0.0:
             raise RuntimeError(f"unexpected interface ends: {pts[0]}, {pts[-1]}")
-        return pts
+        if not self.tip_refine:
+            return pts, None
+        # Circle fit over the raw nodes within one tip radius of the neck.
+        raw = self.interface_polyline()
+        st = self.neck_state()
+        rho = st["tip_radius"]
+        r0 = pts[0][0]
+        near = [q for q in raw if math.hypot(q[0] - r0, q[1]) <= 1.0 * rho]
+        circ = fit_circle_kasa(near) if len(near) >= 5 else None
+        if circ is None:
+            return pts, None
+        (cx, cz), rf = circ
+        # Join where the meniscus has turned ~60 degrees: z ~ rf*sin(60)
+        z_join = 0.85 * rf
+        j = next((i for i, q in enumerate(pts) if q[1] >= z_join), None)
+        if j is None or j < 1 or j >= len(pts) - 2:
+            return pts, None
+        # Project the join point radially onto the fitted circle.
+        qx, qz = pts[j]
+        d = math.hypot(qx - cx, qz - cz)
+        if d <= 0:
+            return pts, None
+        pj = (cx + (qx - cx) * rf / d, cz + (qz - cz) * rf / d)
+        rest = [pj] + pts[j + 1 :]
+        return rest, ((cx, cz), rf, pj)
 
     # ---------------------------------------------------------- diagnostics
     def neck_state(self) -> dict[str, float]:
@@ -526,6 +567,11 @@ class StokesTipCoalescence(Problem):
             self.actions_after_adapt()
             total += len(idx)
         if total:
+            # Children inherit the parent's recorded size, which would trip RemeshWhen's
+            # min_expansion test at once; the bisected mesh is the new reference.
+            for e in mesh.elements():
+                e.set_initial_cartesian_nondim_size(e.get_current_cartesian_nondim_size())
+                e.set_initial_quality_factor(e.get_quality_factor())
             self.assign_initial_values_impulsive()
             self.timestepper.set_num_unsteady_steps_done(0)
             self._taken_already_an_unsteady_step = False
@@ -576,6 +622,8 @@ class StokesTipCoalescence(Problem):
             return None
         if st["R_min"] >= self.remesh_growth * self.rmin_at_remesh:
             return f"bridge grew x{st['R_min'] / self.rmin_at_remesh:.2f}"
+        if self.tip_refine:
+            return None  # bisection tracks the tip; remesh only on bridge growth or quality
         if math.isfinite(rho) and rho < self.tip_shrink_remesh * self.tip_radius_lagged:
             return f"tip radius shrank to {rho:.3e} from {self.tip_radius_lagged:.3e}"
         if math.isfinite(rho) and rho > self.tip_grow_remesh * self.tip_radius_lagged:
