@@ -561,6 +561,11 @@ class StokesTipCoalescence(Problem):
         for _round in range(self.max_refine_rounds):
             st = self.neck_state()
             rho = st["tip_radius"]
+            # On a fresh Gmsh mesh the nearest nodes sit on floor-sized elements and the
+            # circle fit over-reports the tip radius; the pre-remesh value is the better
+            # estimate until the tip is resolved again.
+            if math.isfinite(self.tip_radius_lagged) and self.tip_radius_lagged > 0:
+                rho = min(rho, self.tip_radius_lagged) if (math.isfinite(rho) and rho > 0) else self.tip_radius_lagged
             if not (math.isfinite(rho) and rho > 0):
                 break
             target = max(rho / self.n_tip, self.bisect_floor)
@@ -771,7 +776,8 @@ class StokesTipCoalescence(Problem):
             if max_wall_s is not None and time.time() - self._wall0 > max_wall_s:
                 status = "wall_limit"
                 break
-            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * max(st["tip_radius"] / self.n_tip, self.bisect_floor)):
+            rho_ref = min(st["tip_radius"], self.tip_radius_lagged) if self.tip_radius_lagged > 0 else st["tip_radius"]
+            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * max(rho_ref / self.n_tip, self.bisect_floor)):
                 self._needs_tip_refine = False
                 if self.refine_tip():
                     st = self.neck_state()
@@ -806,6 +812,8 @@ class StokesTipCoalescence(Problem):
             self._steps += 1
             st_prev = st
             st = self.neck_state()
+            if self.tip_refine and math.isfinite(st["tip_radius"]) and st["tip_radius"] > 0 and st["h_tip_now"] <= st["tip_radius"] / 4:
+                self.tip_radius_lagged = st["tip_radius"]  # trust the measurement only when resolved
             self._last_curvature_ratio = abs(st["two_H"] - st_prev["two_H"]) / max(abs(st_prev["two_H"]), 1e-30)
             iters = None
             try:
