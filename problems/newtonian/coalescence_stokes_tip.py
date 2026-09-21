@@ -807,7 +807,10 @@ class StokesTipCoalescence(Problem):
         _, r, z, u, v = self._interface_nodes()
         n = len(r)
         # Neck node: on the plane z=0 with maximal r.
-        on_plane = [i for i in range(n) if abs(z[i]) <= 1e-14]
+        # Plane nodes carry mesh_y = 0 exactly (Dirichlet); an absolute 1e-14 picked the first
+        # interface node above the plane on the R0=1e-4 mapped mesh (z = 7e-15).
+        rmax = float(r.max())
+        on_plane = [i for i in range(n) if abs(z[i]) <= 1e-13 * rmax]
         i0 = max(on_plane, key=lambda i: r[i]) if on_plane else int(z.argmin())
         p0 = (float(r[i0]), float(z[i0]))
         rmin = p0[0]
@@ -825,7 +828,10 @@ class StokesTipCoalescence(Problem):
         for i in order[1:]:
             # Walk outwards in distance and stop at the first node beyond the angle; nodes
             # far up the drop near the axis have |r - R_min| small and must not qualify.
-            if math.atan2(abs(r[i] - p0[0]), max(z[i] - p0[1], 0.0)) > self.tip_fit_angle:
+            # Nodes at or below the tip level (other plane nodes) are skipped, not fatal.
+            if z[i] - p0[1] <= 0.0:
+                continue
+            if math.atan2(abs(r[i] - p0[0]), z[i] - p0[1]) > self.tip_fit_angle:
                 break
             near.append(i)
         if len(near) < 7:
