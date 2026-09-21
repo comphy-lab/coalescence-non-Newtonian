@@ -225,6 +225,7 @@ class StokesTipCoalescence(Problem):
         bisect_floor: float = 2e-13,
         spatial_scale: float | None = None,
         interface_translation: bool = True,
+        anticipation: float = 0.5,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -262,6 +263,7 @@ class StokesTipCoalescence(Problem):
         # everywhere in this class; only Gmsh sizes and element midpoints need converting.
         self.S = float(spatial_scale) if spatial_scale else 1.0
         self.interface_translation = bool(interface_translation)
+        self.anticipation = float(anticipation)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._R_ref = None
@@ -568,7 +570,9 @@ class StokesTipCoalescence(Problem):
                 rho = min(rho, self.tip_radius_lagged) if (math.isfinite(rho) and rho > 0) else self.tip_radius_lagged
             if not (math.isfinite(rho) and rho > 0):
                 break
-            target = max(rho / self.n_tip, self.bisect_floor)
+            # Bisection happens only on a fresh Gmsh mesh (exact macro-element geometry);
+            # resolve the tip for the shrinkage expected before the next remesh trigger.
+            target = max(self.anticipation * rho / self.n_tip, self.bisect_floor)
             r0, z0 = st["R_min"], 0.0
             idx = []
             S = self.S
@@ -677,8 +681,6 @@ class StokesTipCoalescence(Problem):
             return None
         if st["R_min"] >= self.remesh_growth * self.rmin_at_remesh:
             return f"bridge grew x{st['R_min'] / self.rmin_at_remesh:.2f}"
-        if self.tip_refine:
-            return None  # bisection tracks the tip; remesh only on bridge growth or quality
         if math.isfinite(rho) and rho < self.tip_shrink_remesh * self.tip_radius_lagged:
             return f"tip radius shrank to {rho:.3e} from {self.tip_radius_lagged:.3e}"
         if math.isfinite(rho) and rho > self.tip_grow_remesh * self.tip_radius_lagged:
@@ -776,8 +778,7 @@ class StokesTipCoalescence(Problem):
             if max_wall_s is not None and time.time() - self._wall0 > max_wall_s:
                 status = "wall_limit"
                 break
-            rho_ref = min(st["tip_radius"], self.tip_radius_lagged) if self.tip_radius_lagged > 0 else st["tip_radius"]
-            if self.tip_refine and (self._needs_tip_refine or st["h_tip_now"] > 1.3 * max(rho_ref / self.n_tip, self.bisect_floor)):
+            if self.tip_refine and self._needs_tip_refine:
                 self._needs_tip_refine = False
                 if self.refine_tip():
                     st = self.neck_state()
