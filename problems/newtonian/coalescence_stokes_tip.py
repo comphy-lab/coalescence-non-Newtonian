@@ -234,6 +234,7 @@ class StokesTipCoalescence(Problem):
         spatial_scale: float | None = None,
         interface_translation: bool = True,
         anticipation: float = 0.5,
+        max_bisect_levels: int = 5,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -272,6 +273,10 @@ class StokesTipCoalescence(Problem):
         self.S = float(spatial_scale) if spatial_scale else 1.0
         self.interface_translation = bool(interface_translation)
         self.anticipation = float(anticipation)
+        # Bisection depth below the Gmsh base mesh.  Seven or more levels diverged in every
+        # test (R0=1e-4 runs 21/22/24 at level 7; R0=1e-3 with a 1e-6 floor at 13 and 15);
+        # five was always stable.
+        self.max_bisect_levels = int(max_bisect_levels)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._R_ref = None
@@ -585,7 +590,8 @@ class StokesTipCoalescence(Problem):
                 break
             # Bisection happens only on a fresh Gmsh mesh (exact macro-element geometry);
             # resolve the tip for the shrinkage expected before the next remesh trigger.
-            target = max(self.anticipation * rho / self.n_tip, self.bisect_floor)
+            target = max(self.anticipation * rho / self.n_tip, self.bisect_floor,
+                         self.current_h_tip() / 2 ** self.max_bisect_levels)
             r0, z0 = st["R_min"], 0.0
             idx = []
             S = self.S
