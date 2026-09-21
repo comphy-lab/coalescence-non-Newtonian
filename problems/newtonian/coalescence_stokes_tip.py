@@ -340,7 +340,7 @@ class MappedTipMesh(GmshTemplate):
     def _line_piece(p, q):
         return lambda t: (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
 
-    def _control_points(self, pieces, S, size_at, n_fine=24, end_shrink=32):
+    def _control_points(self, pieces, S, size_at, n_fine=24, end_shrink=32, shrink_start=True):
         """Spline control points on the mapped image of the curve.
 
         Each piece is sampled at n_fine parameters, mapped, and the cumulative mapped chord
@@ -383,8 +383,9 @@ class MappedTipMesh(GmshTemplate):
         while True:
             tgt = size_at(out[-1])
             remaining = total - pos
-            step = min(tgt, max(0.5 * pos, tgt / end_shrink) if pos > 0 else tgt / end_shrink,
-                       max(0.5 * remaining, tgt / end_shrink))
+            step = min(tgt, max(0.5 * remaining, tgt / end_shrink))
+            if shrink_start:
+                step = min(step, max(0.5 * pos, tgt / end_shrink) if pos > 0 else tgt / end_shrink)
             if remaining <= 1.5 * tgt / end_shrink:
                 break
             pos += step
@@ -444,7 +445,21 @@ class MappedTipMesh(GmshTemplate):
 
         self._T, self._alpha, self._L = T, a, L
         self._mapping = True
-        h_tip_p = (L ** (1.0 - a)) * (rho ** a) / pb.n_tip     # mapped tip element size
+        # Double-precision floor.  Node coordinates near the tip carry an absolute error of
+        # about eps*R_neck, so an interface element of size h on a tip of radius rho, whose
+        # sagitta is h^2/(2 rho), is geometric noise unless h^2/(2 rho) >> eps R_neck.  Nodes
+        # closer to the tip than h_floor are not placed (R0=1e-6 run 42: control points at
+        # 1e-21 of a 1e-6 neck gave a sign-flipping curvature and a Newton divergence).  At
+        # R0=1e-4 the floor is 1e-15 against a smallest tip element of 4e-14 and never acts.
+        eps = 2.2e-16
+        h_floor_phys = math.sqrt(2.0 * pb.tip_roundoff_factor * eps * r_neck_phys * rho * S)
+        # Solve-accuracy floor: node positions are O(R_neck) unknowns whose converged error is a
+        # fixed fraction of R_neck, so tip elements below tip_rel_floor * R_neck are moved by
+        # more than their size in one step (R0=1e-6 run 44: an element expanded 155x at
+        # h = 7e-13 R_neck).  Zero disables it; 1e-11 leaves R0 >= 1e-4 untouched.
+        h_floor_phys = max(h_floor_phys, pb.tip_rel_floor * r_neck_phys)
+        h_floor_p = (L ** (1.0 - a)) * ((h_floor_phys / S) ** a)
+        h_tip_p = max((L ** (1.0 - a)) * (rho ** a) / pb.n_tip, h_floor_p)   # mapped tip size
         expo = (a - 1.0) / a
 
         def size_mapped(p):
@@ -453,7 +468,8 @@ class MappedTipMesh(GmshTemplate):
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
-        iface_p = self._control_points(pieces, S, lambda p: f_ctrl * size_mapped(p))
+        iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p), h_floor_p),
+                                       shrink_start=False)
         # Axis r = 0 from the pole to the origin: straight physically, curved in the map.
         axis_pieces = []
         z = z_pole
@@ -503,6 +519,7 @@ class MappedTipMesh(GmshTemplate):
             "kind": kind,
             "h_tip": h_tip * S,
             "h_tip_mapped": h_tip_p,
+            "h_floor_phys": h_floor_phys,
             "r_neck": r_neck_phys,
             "alpha": a,
             "n_interface_points": len(iface_p),
@@ -548,6 +565,8 @@ class StokesTipCoalescence(Problem):
         tip_map_alpha: float = 0.0,
         tip_map_control_fraction: float = 0.25,
         tip_fit_angle: float = 0.15,
+        tip_roundoff_factor: float = 100.0,
+        tip_rel_floor: float = 0.0,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -599,6 +618,10 @@ class StokesTipCoalescence(Problem):
         self.tip_map_control_fraction = float(tip_map_control_fraction)
         # Circle-fit window for the tip radius: chord angle from the tip tangent (radians).
         self.tip_fit_angle = float(tip_fit_angle)
+        # Smallest tip-element sagitta allowed, in units of eps*R_neck (MappedTipMesh floor).
+        self.tip_roundoff_factor = float(tip_roundoff_factor)
+        # Smallest tip element relative to R_neck (MappedTipMesh); 0 = off.
+        self.tip_rel_floor = float(tip_rel_floor)
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
