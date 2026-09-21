@@ -162,12 +162,12 @@ class TipGradedQuadrantMesh(GmshTemplate):
             p_n = self.point(r_neck, 0.0)
             p_t = self.point(0.0, z_pole)
             if arc is not None:
-                # Tip as an exact circle arc (fitted radius); the bisection pass refines
-                # along the true circle through the macro element, so the tip survives
-                # a remesh even when it is far below the Gmsh floor.
-                (cx, cz), _rho_fit, pj = arc
+                # Tip as a circle arc through three actual interface nodes (neck, ~15 deg,
+                # ~30 deg); the bisection pass refines along it through the macro element,
+                # so the tip survives a remesh even far below the Gmsh floor.
+                _kind, pm, pj = arc
                 p_j = self.point(pj[0], pj[1])
-                tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
+                tip_arc = self.circle_arc(p_n, p_j, through_point=(pm[0], pm[1]), name="interface")
                 inner = [self.point(x, y) for (x, y) in pts[1:-1]]
                 interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
             else:
@@ -274,6 +274,7 @@ class StokesTipCoalescence(Problem):
 
         # Lagged mesh parameters (set at each remesh).
         self.tip_radius_lagged = self.Z0
+        self.rho_at_remesh = self.Z0
         self.rmin_at_remesh = self.R0
         self.last_rmin = self.R0
         self.n_remesh = 0
@@ -436,19 +437,23 @@ class StokesTipCoalescence(Problem):
         if circ is None:
             return pts, None
         (cx, cz), rf = circ
-        # Join where the meniscus has turned ~60 degrees: z ~ rf*sin(60)
-        z_join = 0.85 * rf
-        j = next((i for i, q in enumerate(pts) if q[1] >= z_join), None)
-        if j is None or j < 1 or j >= len(pts) - 2:
+        # Join at ~30 degrees up the meniscus (z ~ rf/2), where the profile is still
+        # circular to high accuracy, and pass the arc through actual interface nodes
+        # (neck, a node near 15 degrees, the join node) so the join has no tangent kink.
+        z_join = 0.5 * rf
+        j = next((i for i, q in enumerate(raw) if q[1] >= z_join), None)
+        if j is None or j < 2:
             return pts, None
-        # Project the join point radially onto the fitted circle.
-        qx, qz = pts[j]
-        d = math.hypot(qx - cx, qz - cz)
-        if d <= 0:
+        pj = raw[j]
+        m = next((i for i, q in enumerate(raw) if q[1] >= 0.5 * z_join), None)
+        if m is None or m < 1 or m >= j:
             return pts, None
-        pj = (cx + (qx - cx) * rf / d, cz + (qz - cz) * rf / d)
-        rest = [pj] + pts[j + 1 :]
-        return rest, ((cx, cz), rf, pj)
+        pm = raw[m]
+        # Continue the (thinned) polyline strictly beyond the join.
+        rest = [pj] + [q for q in pts[1:] if q[1] > pj[1] + 1e-300]
+        if len(rest) < 4:
+            return pts, None
+        return rest, ("through", pm, pj)
 
     # ---------------------------------------------------------- diagnostics
     def neck_state(self) -> dict[str, float]:
@@ -681,10 +686,11 @@ class StokesTipCoalescence(Problem):
             return None
         if st["R_min"] >= self.remesh_growth * self.rmin_at_remesh:
             return f"bridge grew x{st['R_min'] / self.rmin_at_remesh:.2f}"
-        if math.isfinite(rho) and rho < self.tip_shrink_remesh * self.tip_radius_lagged:
-            return f"tip radius shrank to {rho:.3e} from {self.tip_radius_lagged:.3e}"
-        if math.isfinite(rho) and rho > self.tip_grow_remesh * self.tip_radius_lagged:
-            return f"tip radius grew to {rho:.3e} from {self.tip_radius_lagged:.3e}"
+        ref = self.rho_at_remesh
+        if math.isfinite(rho) and rho < self.tip_shrink_remesh * ref:
+            return f"tip radius shrank to {rho:.3e} from {ref:.3e}"
+        if math.isfinite(rho) and rho > self.tip_grow_remesh * ref:
+            return f"tip radius grew to {rho:.3e} from {ref:.3e}"
         return None
 
     def actions_before_remeshing(self, active_remeshers):
@@ -692,6 +698,7 @@ class StokesTipCoalescence(Problem):
         rho = st["tip_radius"]
         if math.isfinite(rho) and rho > 0:
             self.tip_radius_lagged = rho
+            self.rho_at_remesh = rho
         self.rmin_at_remesh = st["R_min"]
         self.last_rmin = st["R_min"]
         if self._R_ref is not None:
