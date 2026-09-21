@@ -656,6 +656,19 @@ class StokesTipCoalescence(Problem):
         floor = self.gmsh_floor if self.tip_refine else self.h_tip_floor
         return max(self.tip_radius_lagged / self.n_tip, floor)
 
+    def rho_resolvable(self) -> float:
+        """Smallest tip radius the mapped mesh can resolve with n_tip elements, given the
+        double-precision floors recorded at the last mesh build (0 when no floor applies)."""
+        h_floor = float(self._mesh_receipt.get("h_floor_phys", 0.0) or 0.0)
+        return self.n_tip * h_floor
+
+    def tip_unresolved(self, rho: float) -> bool:
+        """True while the measured tip radius is within a factor 4 of the resolvable one: the
+        fit then reads mesh noise and must drive neither remeshing nor the time step (R0=1e-6
+        run 45 thrashed between 'shrank' and 'grew' remeshes at one instant)."""
+        rr = self.rho_resolvable()
+        return rr > 0.0 and (not math.isfinite(rho) or rho < 4.0 * rr)
+
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
         if self.S != 1.0:
@@ -1082,6 +1095,8 @@ class StokesTipCoalescence(Problem):
         if st["R_min"] >= self.remesh_growth * self.rmin_at_remesh:
             return f"bridge grew x{st['R_min'] / self.rmin_at_remesh:.2f}"
         ref = self.rho_at_remesh
+        if self.tip_unresolved(rho):
+            return None
         if math.isfinite(rho) and rho < self.tip_shrink_remesh * ref:
             return f"tip radius shrank to {rho:.3e} from {ref:.3e}"
         if math.isfinite(rho) and rho > self.tip_grow_remesh * ref:
@@ -1091,6 +1106,9 @@ class StokesTipCoalescence(Problem):
     def actions_before_remeshing(self, active_remeshers):
         st = self.neck_state()
         rho = st["tip_radius"]
+        if self.tip_unresolved(rho):
+            # Build the next mesh at the floor; the measured radius is noise there.
+            rho = self.rho_resolvable()
         if math.isfinite(rho) and rho > 0:
             self.tip_radius_lagged = rho
             self.rho_at_remesh = rho
@@ -1152,6 +1170,8 @@ class StokesTipCoalescence(Problem):
         u = max(abs(st["u_neck"]), 1e-3)
         dt_phys = self.dt_fraction * st["R_min"] / u
         ratio = max(self._last_curvature_ratio, 1e-12)
+        if self.tip_unresolved(st["tip_radius"]):
+            ratio = 1e-12          # curvature reading is noise below the resolvable tip radius
         factor = math.sqrt(self.curvature_change_target / ratio)
         growth = 2.0 if getattr(self, "_regrow", False) else self.dt_growth
         factor = min(growth, max(0.5, factor))
