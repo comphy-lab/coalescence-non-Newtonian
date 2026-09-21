@@ -123,28 +123,34 @@ def circle_through(p0, p1, p2) -> tuple[tuple[float, float], float] | None:
 class TipGradedQuadrantMesh(GmshTemplate):
     """One quadrant of one drop; triangles graded geometrically from the neck tip."""
 
-    def _chunked_splines(self, pts, p_first, p_last, ratio: float = 100.0):
-        """Catmull-Rom splines through pts (first/last given as existing Points), split so
-        that each piece spans at most ``ratio`` in segment length: pyoomph's Gauss-Newton
-        spline parameter inversion fails on a single spline spanning ten decades."""
+    def _piecewise_arcs(self, pts, p_first, p_last):
+        """Interface as circle arcs through consecutive node triples (p_i, p_i+1, p_i+2).
+
+        pyoomph inverts a circle arc analytically (atan2 about the centre), whereas its
+        Catmull-Rom spline inversion is a Gauss-Newton iteration that fails once the spline
+        spans many decades of segment length.  Adjacent arcs are C0 with tangent kinks of
+        order h^2 dkappa/ds, the same continuity class as the Q2 boundary itself.
+        """
         curves = []
+        n = len(pts)
+        i = 0
         start_pt = p_first
-        chunk = [pts[0]]
-        seg_min = seg_max = None
-        for k in range(1, len(pts)):
-            seg = math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1])
-            lo = seg if seg_min is None else min(seg_min, seg)
-            hi = seg if seg_max is None else max(seg_max, seg)
-            if seg_min is not None and hi > ratio * lo and len(chunk) >= 3:
-                end_pt = self.point(*pts[k - 1])
-                curves.append(self.spline([start_pt, *[self.point(*q) for q in chunk[1:-1]], end_pt], name="interface"))
+        while i < n - 1:
+            if i + 2 <= n - 1:
+                p0, p1, p2 = pts[i], pts[i + 1], pts[i + 2]
+                end_pt = p_last if i + 2 == n - 1 else self.point(*p2)
+                circ = circle_through(p0, p1, p2)
+                if circ is not None and circ[1] < 1e6 * math.hypot(p2[0] - p0[0], p2[1] - p0[1]):
+                    curves.append(self.circle_arc(start_pt, end_pt, center=circ[0], name="interface"))
+                else:
+                    mid_pt = self.point(*p1)
+                    curves.append(self.line(start_pt, mid_pt, name="interface"))
+                    curves.append(self.line(mid_pt, end_pt, name="interface"))
                 start_pt = end_pt
-                chunk = [pts[k - 1], pts[k]]
-                seg_min = seg_max = seg
+                i += 2
             else:
-                chunk.append(pts[k])
-                seg_min, seg_max = lo, hi
-        curves.append(self.spline([start_pt, *[self.point(*q) for q in chunk[1:-1]], p_last], name="interface"))
+                curves.append(self.line(start_pt, p_last, name="interface"))
+                i += 1
         return curves
 
     def define_geometry(self):
@@ -200,9 +206,9 @@ class TipGradedQuadrantMesh(GmshTemplate):
                     raise RuntimeError("tip arc nodes are collinear")
                 (cx, cz), _rf = circ
                 tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
-                interface = [tip_arc] + self._chunked_splines([pj] + pts[2:-1] + [(0.0, z_pole)], p_j, p_t)
+                interface = [tip_arc] + self._piecewise_arcs([pj] + pts[2:-1] + [(0.0, z_pole)], p_j, p_t)
             else:
-                interface = self._chunked_splines(pts, p_n, p_t)
+                interface = self._piecewise_arcs(pts, p_n, p_t)
             pb._mesh_receipt = {
                 "kind": "remesh",
                 "h_tip": h_tip * S,
