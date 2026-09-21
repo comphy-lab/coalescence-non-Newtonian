@@ -166,6 +166,7 @@ class TipGradedQuadrantMesh(GmshTemplate):
                 # ~30 deg); the bisection pass refines along it through the macro element,
                 # so the tip survives a remesh even far below the Gmsh floor.
                 _kind, pm, pj = arc
+                assert pts[1] == pj
                 p_j = self.point(pj[0], pj[1])
                 # Centre from the three nodes in physical units: pyoomph's through_point
                 # route declares the tiny tip collinear (|det| < 1e-10 in solver units)
@@ -175,7 +176,7 @@ class TipGradedQuadrantMesh(GmshTemplate):
                     raise RuntimeError("tip arc nodes are collinear")
                 (cx, cz), _rf = circ
                 tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
-                inner = [self.point(x, y) for (x, y) in pts[1:-1]]
+                inner = [self.point(x, y) for (x, y) in pts[2:-1]]
                 interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
             else:
                 inner = [self.point(x, y) for (x, y) in pts[1:-1]]
@@ -456,9 +457,9 @@ class StokesTipCoalescence(Problem):
         if m is None or m < 1 or m >= j:
             return pts, None
         pm = raw[m]
-        # Continue the (thinned) polyline strictly beyond the join.
-        rest = [pj] + [q for q in pts[1:] if q[1] > pj[1] + 1e-300]
-        if len(rest) < 4:
+        # Keep the true neck first, then the join, then the (thinned) polyline beyond it.
+        rest = [pts[0], pj] + [q for q in pts[1:] if q[1] > pj[1] + 1e-300]
+        if len(rest) < 5:
             return pts, None
         return rest, ("through", pm, pj)
 
