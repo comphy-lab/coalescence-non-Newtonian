@@ -167,7 +167,14 @@ class TipGradedQuadrantMesh(GmshTemplate):
                 # so the tip survives a remesh even far below the Gmsh floor.
                 _kind, pm, pj = arc
                 p_j = self.point(pj[0], pj[1])
-                tip_arc = self.circle_arc(p_n, p_j, through_point=(pm[0], pm[1]), name="interface")
+                # Centre from the three nodes in physical units: pyoomph's through_point
+                # route declares the tiny tip collinear (|det| < 1e-10 in solver units)
+                # and would silently substitute a straight line.
+                circ = circle_through((r_neck, 0.0), pm, pj)
+                if circ is None:
+                    raise RuntimeError("tip arc nodes are collinear")
+                (cx, cz), _rf = circ
+                tip_arc = self.circle_arc(p_n, p_j, center=(cx, cz), name="interface")
                 inner = [self.point(x, y) for (x, y) in pts[1:-1]]
                 interface = [tip_arc, self.spline([p_j, *inner, p_t], name="interface")]
             else:
