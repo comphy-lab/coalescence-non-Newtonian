@@ -237,6 +237,24 @@ class TipGradedQuadrantMesh(GmshTemplate):
         self.set_mesh_size_background_field(field)
 
 
+# Timing around Gmsh generation (a remesh at the R0=1e-6 asymptotic tip stalled silently for
+# 15+ minutes in runs 48 and 57 between define_geometry and the mesh load).
+import pyoomph.meshes.gmsh as _pyoomph_gmsh_module
+
+_orig_generate_mesh_to_file = _pyoomph_gmsh_module.generate_mesh_to_file
+
+
+def _timed_generate_mesh_to_file(*args, **kwargs):
+    t0 = time.time()
+    print("GMSH: generate start", flush=True)
+    result = _orig_generate_mesh_to_file(*args, **kwargs)
+    print(f"GMSH: generate done in {time.time() - t0:.1f} s", flush=True)
+    return result
+
+
+_pyoomph_gmsh_module.generate_mesh_to_file = _timed_generate_mesh_to_file
+
+
 class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
     """Axisymmetric coordinates with the radial mesh coordinate measured from a moving origin.
 
@@ -377,7 +395,10 @@ class MappedTipMesh(GmshTemplate):
         return super().add_node(x, y, z)
 
     def _load_mesh(self, mshfilename):  # type: ignore[override]
+        t0 = time.time()
+        print("MESH LOAD: start", flush=True)
         super()._load_mesh(mshfilename)
+        print(f"MESH LOAD: done in {time.time() - t0:.1f} s", flush=True)
         tag = getattr(self, "_dbg_tag", None)
         if tag:
             numpy.save(tag, numpy.asarray(self._mesh.points))
