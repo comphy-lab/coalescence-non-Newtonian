@@ -322,14 +322,34 @@ class MappedTipMesh(GmshTemplate):
         self._alpha = 1.0
         self._L = 1.0
         self._shift_s = 0.0      # X = r - shift (solver units) when the neck frame is on
+        self._beta = 0.5
+        self._dc = float("inf")
+        self._dcp = float("inf")
+        self._A = 1.0
 
     # ---------------------------------------------------------------- the map
+    # Composite radial map: exponent alpha inside the core d <= d_c (alpha = 1/2 makes the
+    # mapped tip an exact parabola, which Gmsh's Catmull-Rom spline reproduces exactly; any
+    # other exponent misplaces the innermost nodes, run 52), exponent beta < alpha outside,
+    # continuous at d_c.  The outer compression shrinks the mapped far field and with it the
+    # ratio of model size to mapped tip element that Gmsh must resolve (run 53: eleven decades
+    # at the asymptotic R0=1e-6 tip is beyond its floor; beta = 0.4 gains a factor 40).
+    def _g(self, d: float) -> float:
+        if d <= self._dc:
+            return (self._L ** (1.0 - self._alpha)) * d ** self._alpha
+        return self._A * d ** self._beta
+
+    def _ginv(self, dp: float) -> float:
+        if dp <= self._dcp:
+            return (dp / self._L ** (1.0 - self._alpha)) ** (1.0 / self._alpha)
+        return (dp / self._A) ** (1.0 / self._beta)
+
     def _fwd(self, x: float, y: float) -> tuple[float, float]:
         dx, dy = x - self._T, y
         d = math.hypot(dx, dy)
         if d == 0.0:
             return x, y
-        s = (self._L ** (1.0 - self._alpha)) * d ** self._alpha / d
+        s = self._g(d) / d
         return self._T + dx * s, dy * s
 
     def _inv(self, xp: float, yp: float) -> tuple[float, float]:
@@ -337,8 +357,7 @@ class MappedTipMesh(GmshTemplate):
         dp = math.hypot(dx, dy)
         if dp == 0.0:
             return xp, yp
-        d = (dp / self._L ** (1.0 - self._alpha)) ** (1.0 / self._alpha)
-        s = d / dp
+        s = self._ginv(dp) / dp
         return self._T + dx * s, dy * s
 
     def _size_mapped(self, dp: float, h_tip_p: float, k: float) -> float:
@@ -501,6 +520,11 @@ class MappedTipMesh(GmshTemplate):
         r_neck_phys = r_neck * S
 
         self._T, self._alpha, self._L = T, a, L
+        b = pb.tip_map_outer if pb.tip_map_outer > 0 else a
+        self._beta = b
+        self._dc = pb.tip_map_core * rho if b != a else float("inf")
+        self._dcp = (L ** (1.0 - a)) * self._dc ** a if b != a else float("inf")
+        self._A = (L ** (1.0 - a)) * self._dc ** (a - b) if b != a else 1.0
         self._mapping = True
         # Double-precision floor.  Node coordinates near the tip carry an absolute error of
         # about eps*R_neck, so an interface element of size h on a tip of radius rho, whose
@@ -522,11 +546,15 @@ class MappedTipMesh(GmshTemplate):
         h_tip_p = max((L ** (1.0 - a)) * (rho ** a) / pb.n_tip, h_floor_p)   # mapped tip size
         expo = (a - 1.0) / a
 
+        # Physical cap h_max in mapped units, h' = h_max * dg/dd, in each branch of the map.
+        expo_o = (b - 1.0) / b
+        A = self._A
+
         def size_mapped(p):
-            dp = math.hypot(p[0] - T, p[1])
-            # (dp/L)**expo with expo < 0 overflows a double at the tip point for a != 1/2
-            # (runs 50, 51: OverflowError at dp = 1e-300); the cap is irrelevant there anyway.
-            cap = h_max * (max(dp, 1e-3 * h_tip_p) / L) ** expo
+            dp = max(math.hypot(p[0] - T, p[1]), 1e-3 * h_tip_p)   # clamp: negative powers
+            cap = h_max * (dp / L) ** expo
+            if b != a:
+                cap = min(cap, h_max * b * A * (dp / A) ** expo_o)
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
@@ -579,13 +607,17 @@ class MappedTipMesh(GmshTemplate):
 
         dist = self.add_mesh_size_field("Distance", PointsList=[p_n])
         # Physical cap h_max expressed in mapped units: h' = h (d'/d) = h_max (d'/L)^((a-1)/a).
+        dclamp = f"max(F{dist},{1e-3 * h_tip_p!r})"
+        cap_expr = f"{h_max!r}*({dclamp}/{L!r})^({expo!r})"
+        if b != a:
+            cap_expr = f"min({cap_expr}, {h_max * b * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
         field = self.add_mesh_size_field(
             "MathEval",
-            F=f"min({h_max!r}*(max(F{dist},{1e-3 * h_tip_p!r})/{L!r})^({expo!r}), max({h_tip_p!r}, {k!r}*F{dist}))",
+            F=f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))",
         )
         self.set_mesh_size_background_field(field)
         print(f"MESH GEOMETRY: {kind}, {len(iface_p)} interface + {len(axis_p)} axis control points, "
-              f"h_tip_mapped={h_tip_p:.3e}, h_floor={h_floor_phys:.3e}, shift={pb.frame_shift_phys:.6e}, "
+              f"h_tip_mapped={h_tip_p:.3e}, bbox_mapped~{self._g(2.0 * L):.3e}, h_floor={h_floor_phys:.3e}, shift={pb.frame_shift_phys:.6e}, "
               f"{time.time() - t_geo:.1f} s", flush=True)
         pb._mesh_receipt = {
             "kind": kind,
@@ -640,7 +672,9 @@ class StokesTipCoalescence(Problem):
         tip_roundoff_factor: float = 100.0,
         tip_rel_floor: float = 0.0,
         neck_frame: bool = False,
-        gmsh_random_factor: float = 1e-14,
+        gmsh_random_factor: float = 1e-9,
+        tip_map_outer: float = 0.0,
+        tip_map_core: float = 1e3,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -699,6 +733,9 @@ class StokesTipCoalescence(Problem):
         # Neck-anchored radial frame X = r - R_shift (NeckFrameAxisymmetric); requires tip_map.
         self.neck_frame = bool(neck_frame)
         self.gmsh_random_factor = float(gmsh_random_factor)
+        # Composite map: outer exponent (0 = same as tip_map_alpha) beyond tip_map_core tip radii.
+        self.tip_map_outer = float(tip_map_outer)
+        self.tip_map_core = float(tip_map_core)
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
         self._needs_tip_refine = False
@@ -1341,7 +1378,13 @@ class StokesTipCoalescence(Problem):
                             continue
                         except Exception as exc2:
                             print(f"remesh retry failed: {exc2!r}", flush=True)
-                    self._dof_restore(snapshot)
+                    try:
+                        self._dof_restore(snapshot)
+                    except Exception as exc3:
+                        # A quality remesh inside the failed step replaced the mesh; the snapshot
+                        # no longer fits.  Continue from the remeshed state with a smaller step.
+                        print(f"snapshot restore skipped after mid-step remesh: {exc3!r}", flush=True)
+                        self._dt_prev = None
                     dt *= 0.3
                 finally:
                     self._predict_now = False
