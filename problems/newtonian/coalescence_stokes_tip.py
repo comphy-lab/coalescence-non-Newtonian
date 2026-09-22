@@ -559,6 +559,10 @@ class MappedTipMesh(GmshTemplate):
         self.set_gmsh_parameter("Mesh.MeshSizeFromPoints", 0)
         self.set_gmsh_parameter("Mesh.MeshSizeExtendFromBoundary", 0)
         self.set_gmsh_parameter("Mesh.Algorithm", 6)
+        # Gmsh perturbs the boundary points of its 2D Delaunay by RandomFactor times the
+        # model size (default 1e-9); with the mapped tip at 1e-11 of the model size that
+        # perturbation is the meshing floor (run 49: surface returned empty at 7e-12).
+        self.set_gmsh_parameter("Mesh.RandomFactor", pb.gmsh_random_factor)
 
         self._shift_s = pb.frame_shift_phys / S
         sh = self._shift_s
@@ -636,6 +640,7 @@ class StokesTipCoalescence(Problem):
         tip_roundoff_factor: float = 100.0,
         tip_rel_floor: float = 0.0,
         neck_frame: bool = False,
+        gmsh_random_factor: float = 1e-14,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -693,6 +698,7 @@ class StokesTipCoalescence(Problem):
         self.tip_rel_floor = float(tip_rel_floor)
         # Neck-anchored radial frame X = r - R_shift (NeckFrameAxisymmetric); requires tip_map.
         self.neck_frame = bool(neck_frame)
+        self.gmsh_random_factor = float(gmsh_random_factor)
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
         self._needs_tip_refine = False
