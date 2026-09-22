@@ -509,7 +509,10 @@ class MappedTipMesh(GmshTemplate):
         # 1e-21 of a 1e-6 neck gave a sign-flipping curvature and a Newton divergence).  At
         # R0=1e-4 the floor is 1e-15 against a smallest tip element of 4e-14 and never acts.
         eps = 2.2e-16
-        h_floor_phys = math.sqrt(2.0 * pb.tip_roundoff_factor * eps * r_neck_phys * rho * S)
+        # Coordinate scale of the tip nodes: R_neck in the laboratory frame, the tip radius
+        # itself in the neck-anchored frame (X = r - R_shift is O(rho) there).
+        coord_scale = rho * S if pb.neck_frame else r_neck_phys
+        h_floor_phys = math.sqrt(2.0 * pb.tip_roundoff_factor * eps * coord_scale * rho * S)
         # Solve-accuracy floor: node positions are O(R_neck) unknowns whose converged error is a
         # fixed fraction of R_neck, so tip elements below tip_rel_floor * R_neck are moved by
         # more than their size in one step (R0=1e-6 run 44: an element expanded 155x at
@@ -525,6 +528,7 @@ class MappedTipMesh(GmshTemplate):
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
+        t_geo = time.time()
         iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p), h_floor_p),
                                        shrink_start=False)
         # Axis r = 0 from the pole to the origin: straight physically, curved in the map.
@@ -574,6 +578,9 @@ class MappedTipMesh(GmshTemplate):
             F=f"min({h_max!r}*(max(F{dist},1e-300)/{L!r})^({expo!r}), max({h_tip_p!r}, {k!r}*F{dist}))",
         )
         self.set_mesh_size_background_field(field)
+        print(f"MESH GEOMETRY: {kind}, {len(iface_p)} interface + {len(axis_p)} axis control points, "
+              f"h_tip_mapped={h_tip_p:.3e}, h_floor={h_floor_phys:.3e}, shift={pb.frame_shift_phys:.6e}, "
+              f"{time.time() - t_geo:.1f} s", flush=True)
         pb._mesh_receipt = {
             "kind": kind,
             "h_tip": h_tip * S,
