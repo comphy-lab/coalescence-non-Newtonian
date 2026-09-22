@@ -45,7 +45,8 @@ from pyoomph.equations.generic import (
     ScalarField,
     WeakContribution,
 )
-from pyoomph.expressions import cartesian, dot, exp, vector
+from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff
+from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
 from .geometry import sphere_bridge_junction, sphere_centre
@@ -236,6 +237,59 @@ class TipGradedQuadrantMesh(GmshTemplate):
         self.set_mesh_size_background_field(field)
 
 
+class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
+    """Axisymmetric coordinates with the radial mesh coordinate measured from a moving origin.
+
+    The mesh stores X = r - R_shift, with R_shift a global parameter (solver units) reset to
+    the neck radius at every remesh.  In double precision the tip nodes then carry absolute
+    errors of eps*|X| ~ eps*rho instead of eps*R_neck, which is what a tip radius twelve
+    decades below the neck radius (R0 = 1e-6) needs; see decision record 10-la0-restart §4j.
+    Only the places where the physical radius r enters are overridden: the 2 pi r measure,
+    the error-estimation Jacobian and the hoop terms of vector gradient and divergence.
+    Derivatives with respect to X equal those with respect to r.
+    """
+
+    def __init__(self, shift):
+        super().__init__()
+        self.shift = shift
+
+    def _shift(self, with_scales: bool):
+        return self.shift * scale_factor("spatial") if with_scales else self.shift
+
+    def integral_dx(self, nodal_dim, edim, with_scale, spatial_scale, lagrangian):
+        if edim >= 3:
+            raise RuntimeError("Axisymmetry does not work for dimension " + str(edim))
+        edim_offs = edim + 1
+        r = (nondim("lagrangian_x") if lagrangian else nondim("coordinate_x")) + self.shift
+        dx = nondim("dX") if lagrangian else nondim("dx")
+        if with_scale:
+            return spatial_scale ** edim_offs * 2 * pi * r * dx
+        return 2 * pi * r * dx
+
+    def geometric_jacobian(self):
+        if self.cartesian_error_estimation:
+            return Expression(1)
+        return 2 * pi * (nondim("coordinate_x") + self.shift)
+
+    def vector_gradient(self, arg, ndim, edim, with_scales, lagrangian):
+        if ndim != 2:
+            raise RuntimeError("NeckFrameAxisymmetric supports two-dimensional (r,z) meshes only")
+        if arg.nops() != 3:
+            raise RuntimeError("Cannot take a 2d axisymmetric vector gradient from a vector with dim!=2:  " + str(arg))
+        x, y = self.get_coords(ndim, with_scales, lagrangian)
+        r = x + self._shift(with_scales)
+        res = [[diff(arg[0], x), diff(arg[0], y), 0],
+               [diff(arg[1], x), diff(arg[1], y), 0], [0, 0, arg[0] / r]]
+        return matrix(res)
+
+    def vector_divergence(self, arg, ndim, edim, with_scales, lagrangian):
+        if ndim != 2:
+            raise RuntimeError("NeckFrameAxisymmetric supports two-dimensional (r,z) meshes only")
+        coords = self.get_coords(ndim, with_scales, lagrangian)
+        r = coords[0] + self._shift(with_scales)
+        return diff(arg[0], coords[0]) + diff(arg[1], coords[1]) + arg[0] / r
+
+
 class MappedTipMesh(GmshTemplate):
     """One quadrant of one drop, generated in tip-magnifying coordinates.
 
@@ -267,6 +321,7 @@ class MappedTipMesh(GmshTemplate):
         self._T = 0.0
         self._alpha = 1.0
         self._L = 1.0
+        self._shift_s = 0.0      # X = r - shift (solver units) when the neck frame is on
 
     # ---------------------------------------------------------------- the map
     def _fwd(self, x: float, y: float) -> tuple[float, float]:
@@ -292,12 +347,14 @@ class MappedTipMesh(GmshTemplate):
     # Nodes arrive from the .msh file in mapped coordinates; store them physically.
     def add_node_unique(self, x, y, z):  # type: ignore[override]
         if self._mapping:
-            x, y = self._inv(x, y)
+            x, y = self._inv(x + self._shift_s, y)
+            x -= self._shift_s
         return super().add_node_unique(x, y, z)
 
     def add_node(self, x, y, z):  # type: ignore[override]
         if self._mapping:
-            x, y = self._inv(x, y)
+            x, y = self._inv(x + self._shift_s, y)
+            x -= self._shift_s
         return super().add_node(x, y, z)
 
     def _load_mesh(self, mshfilename):  # type: ignore[override]
@@ -497,13 +554,15 @@ class MappedTipMesh(GmshTemplate):
         self.set_gmsh_parameter("Mesh.MeshSizeExtendFromBoundary", 0)
         self.set_gmsh_parameter("Mesh.Algorithm", 6)
 
-        p_n = self.point(T, 0.0, consider_spatial_scale=False)
-        p_t = self.point(*iface_p[-1], consider_spatial_scale=False)
-        p_o = self.point(*axis_p[-1], consider_spatial_scale=False)
-        assert math.hypot(p_t.x[0] - axis_p[0][0], p_t.x[1] - axis_p[0][1]) < 1e-9 * L, "pole mismatch"
-        inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in iface_p[1:-1]]
+        self._shift_s = pb.frame_shift_phys / S
+        sh = self._shift_s
+        p_n = self.point(T - sh, 0.0, consider_spatial_scale=False)
+        p_t = self.point(iface_p[-1][0] - sh, iface_p[-1][1], consider_spatial_scale=False)
+        p_o = self.point(axis_p[-1][0] - sh, axis_p[-1][1], consider_spatial_scale=False)
+        assert math.hypot(iface_p[-1][0] - axis_p[0][0], iface_p[-1][1] - axis_p[0][1]) < 1e-9 * L, "pole mismatch"
+        inner = [self.point(x - sh, y, consider_spatial_scale=False) for (x, y) in iface_p[1:-1]]
         interface = self.spline([p_n, *inner, p_t], name="interface", with_macro_element=False)
-        ax_inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in axis_p[1:-1]]
+        ax_inner = [self.point(x - sh, y, consider_spatial_scale=False) for (x, y) in axis_p[1:-1]]
         axis = self.spline([p_t, *ax_inner, p_o], name="axis", with_macro_element=False)
         plane = self.line(p_o, p_n, name="plane")
         self.plane_surface(plane, interface, axis, name="drop")
@@ -567,6 +626,7 @@ class StokesTipCoalescence(Problem):
         tip_fit_angle: float = 0.15,
         tip_roundoff_factor: float = 100.0,
         tip_rel_floor: float = 0.0,
+        neck_frame: bool = False,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -622,6 +682,10 @@ class StokesTipCoalescence(Problem):
         self.tip_roundoff_factor = float(tip_roundoff_factor)
         # Smallest tip element relative to R_neck (MappedTipMesh); 0 = off.
         self.tip_rel_floor = float(tip_rel_floor)
+        # Neck-anchored radial frame X = r - R_shift (NeckFrameAxisymmetric); requires tip_map.
+        self.neck_frame = bool(neck_frame)
+        self.frame_shift_phys = float(R0) if neck_frame else 0.0
+        self._R_shift = None
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
@@ -670,7 +734,13 @@ class StokesTipCoalescence(Problem):
         return rr > 0.0 and (not math.isfinite(rho) or rho < 4.0 * rr)
 
     def define_problem(self):
-        self.set_coordinate_system("axisymmetric")
+        if self.neck_frame:
+            if not self.tip_map_alpha > 0:
+                raise RuntimeError("neck_frame requires the mapped template (tip_map_alpha > 0)")
+            self._R_shift = self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
+            self.set_coordinate_system(NeckFrameAxisymmetric(self._R_shift))
+        else:
+            self.set_coordinate_system("axisymmetric")
         if self.S != 1.0:
             self.set_scaling(spatial=self.S)
         self.set_output_directory(str(self.output_root / "pyoomph"))
@@ -694,7 +764,13 @@ class StokesTipCoalescence(Problem):
             )
         )
         eqs += IntegralObservables(volume=1)
-        eqs += AxisymmetryBC() @ "axis"
+        # Physical radius offset as a dimensional expression (zero in the laboratory frame).
+        shift_phys = self._R_shift * scale_factor("spatial") if self.neck_frame else 0
+        if self.neck_frame:
+            # The axis r = 0 sits at X = -R_shift; AxisymmetryBC would pin X = 0.
+            eqs += DirichletBC(velocity_x=0, mesh_x=-shift_phys) @ "axis"
+        else:
+            eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
         eqs += NavierStokesFreeSurface(surface_tension=1.0) @ "interface"
         if self.neck_stretch:
@@ -710,16 +786,18 @@ class StokesTipCoalescence(Problem):
                 (GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)) @ "globals"
             )
             Rn = var("R_neck", domain="globals")
-            eqs += EnforcedBC(mesh_x=var("mesh_x") - var("lagrangian_x") * Rn / self._R_ref) @ "plane"
+            eqs += EnforcedBC(mesh_x=var("mesh_x") + shift_phys - (var("lagrangian_x") + shift_phys) * Rn / self._R_ref) @ "plane"
             eqs += DirichletBC(_lagr_enf_bc_mesh_x=0) @ "plane/interface"
-            eqs += WeakContribution(var("mesh_x") - Rn, testfunction("R_neck", domain="globals")) @ "interface/plane"
+            if self.neck_frame:
+                eqs += DirichletBC(_lagr_enf_bc_mesh_x=0) @ "plane/axis"
+            eqs += WeakContribution(var("mesh_x") + shift_phys - Rn, testfunction("R_neck", domain="globals")) @ "interface/plane"
             # Tangential motion of the interface: a radial translation by (R_neck - R_ref)
             # decaying with Lagrangian distance from the neck over L = tip_translation_span*R_ref,
             # imposed through a tangential Lagrange multiplier.  The normal motion stays with
             # the kinematic condition.  Pinned at both corners where the tangent is already fixed.
         if self.neck_stretch and self.interface_translation:
             X = var("lagrangian")
-            s2 = (X[0] - self._R_ref) ** 2 + X[1] ** 2
+            s2 = (X[0] + shift_phys - self._R_ref) ** 2 + X[1] ** 2
             shift = (Rn - self._R_ref) * exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
             tvec = vector(-var("normal_y"), var("normal_x"))
             target = var("mesh") - X - vector(shift, 0)
@@ -738,7 +816,7 @@ class StokesTipCoalescence(Problem):
         data = MeshDataCache(tesselate_tri=False, nondimensional=False).get_data(
             self.get_mesh("drop/interface")
         )
-        r = data.get_data("coordinate_x")
+        r = data.get_data("coordinate_x") + self.frame_shift_phys
         z = data.get_data("coordinate_y")
         u = data.get_data("velocity_x")
         v = data.get_data("velocity_y")
@@ -751,7 +829,7 @@ class StokesTipCoalescence(Problem):
         segs, _ = data.get_interface_line_segments()
         pts = data.get_coordinates()
         segs = sort_line_segments(pts, segs, sort_along_axis="y+", whom="interface")
-        poly = [(float(pts[0, i]), float(pts[1, i])) for seg in segs for i in seg]
+        poly = [(float(pts[0, i]) + self.frame_shift_phys, float(pts[1, i])) for seg in segs for i in seg]
         # Remove consecutive duplicates that segment joins produce.
         out: list[tuple[float, float]] = []
         for p in poly:
@@ -1118,6 +1196,17 @@ class StokesTipCoalescence(Problem):
             self._R_ref.value = st["R_min"]
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
+        if self.neck_frame:
+            # Move the frame origin to the neck: translate every node by -dX and advance the
+            # parameter, a physically identical state, before the new mesh is generated and
+            # the old one interpolated in the same frame.
+            new_shift = st["R_min"]
+            dX = (new_shift - self.frame_shift_phys) / self.S
+            if dX != 0.0:
+                for node in self.get_mesh("drop").nodes():
+                    node.set_x(0, node.x(0) - dX)
+                self._R_shift.value = new_shift / self.S
+                self.frame_shift_phys = new_shift
         super().actions_before_remeshing(active_remeshers)
 
     def actions_after_remeshing(self):

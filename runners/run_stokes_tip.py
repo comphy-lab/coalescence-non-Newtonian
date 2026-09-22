@@ -37,6 +37,7 @@ def main() -> int:
     ap.add_argument("--bisect-floor", type=float, default=2e-13)
     ap.add_argument("--spatial-scale", type=float, default=None, help="pyoomph spatial scale; 0 or negative means R0")
     ap.add_argument("--tip-map", type=float, default=0.0, help="exponent a of the tip-magnifying mesh map (MappedTipMesh); 0 = off, 0.6 recommended")
+    ap.add_argument("--neck-frame", action="store_true", help="radial mesh coordinate measured from the neck (NeckFrameAxisymmetric); requires --tip-map")
     ap.add_argument("--tip-rel-floor", type=float, default=0.0, help="smallest tip element relative to R_neck on the mapped mesh (double-precision solve floor); 0 = off")
     args = ap.parse_args()
 
@@ -91,6 +92,7 @@ def main() -> int:
         spatial_scale=spatial_scale,
         tip_map_alpha=args.tip_map,
         tip_rel_floor=args.tip_rel_floor,
+        neck_frame=args.neck_frame,
     )
     pb.quiet()
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
