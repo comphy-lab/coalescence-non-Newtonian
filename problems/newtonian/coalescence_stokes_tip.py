@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from pyoomph import *
+from pyoomph import _pyoomph_core as _pyoomph
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
 from pyoomph.equations.generic import (
     AxisymmetryBC,
@@ -700,6 +701,7 @@ class StokesTipCoalescence(Problem):
         tip_map_outer: float = 0.0,
         tip_map_core: float = 1e3,
         max_residuals: float = 1e10,
+        extra_newton_iterations: int = 0,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -763,6 +765,7 @@ class StokesTipCoalescence(Problem):
         self.tip_map_core = float(tip_map_core)
         # oomph-lib Newton residual cap; scales with 1/(Z0 S^2) like the tolerance.
         self.max_residuals_cap = float(max_residuals)
+        self.extra_newton_iterations = int(extra_newton_iterations)
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
         self._needs_tip_refine = False
@@ -1390,6 +1393,14 @@ class StokesTipCoalescence(Problem):
                 self._predict_now = True
                 try:
                     self.solve(timestep=dt, do_not_set_IC=True)
+                    # The max-residual test is dominated by far-field rows whose weights exceed
+                    # the tip rows by ~20 decades at R0=1e-6, so Newton stops with the tip
+                    # equations unconverged and a grid-scale wrinkle grows on the tip (run 58).
+                    # Re-enter oomph-lib's Newton on the same time-discrete system (history
+                    # already shifted, weights unchanged); always_take_one_newton_step makes each
+                    # call do at least one more quadratic iteration.
+                    for _extra in range(self.extra_newton_iterations):
+                        _pyoomph.Problem.newton_solve(self, 0)
                     ok = True
                     break
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
