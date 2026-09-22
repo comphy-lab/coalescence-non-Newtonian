@@ -546,7 +546,8 @@ class MappedTipMesh(GmshTemplate):
         h_tip_p = max((L ** (1.0 - a)) * (rho ** a) / pb.n_tip, h_floor_p)   # mapped tip size
         expo = (a - 1.0) / a
 
-        # Physical cap h_max in mapped units, h' = h_max * dg/dd, in each branch of the map.
+        # Physical cap h_max in mapped units along the interface, h' = h_max * g(d)/d (the
+        # tangential stretch; radial elements are 1/exponent times longer), in each branch.
         expo_o = (b - 1.0) / b
         A = self._A
 
@@ -554,7 +555,7 @@ class MappedTipMesh(GmshTemplate):
             dp = max(math.hypot(p[0] - T, p[1]), 1e-3 * h_tip_p)   # clamp: negative powers
             cap = h_max * (dp / L) ** expo
             if b != a:
-                cap = min(cap, h_max * b * A * (dp / A) ** expo_o)
+                cap = min(cap, h_max * A * (dp / A) ** expo_o)
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
@@ -610,7 +611,7 @@ class MappedTipMesh(GmshTemplate):
         dclamp = f"max(F{dist},{1e-3 * h_tip_p!r})"
         cap_expr = f"{h_max!r}*({dclamp}/{L!r})^({expo!r})"
         if b != a:
-            cap_expr = f"min({cap_expr}, {h_max * b * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
+            cap_expr = f"min({cap_expr}, {h_max * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
         field = self.add_mesh_size_field(
             "MathEval",
             F=f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))",
