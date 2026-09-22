@@ -524,7 +524,9 @@ class MappedTipMesh(GmshTemplate):
 
         def size_mapped(p):
             dp = math.hypot(p[0] - T, p[1])
-            cap = h_max * (max(dp, 1e-300) / L) ** expo
+            # (dp/L)**expo with expo < 0 overflows a double at the tip point for a != 1/2
+            # (runs 50, 51: OverflowError at dp = 1e-300); the cap is irrelevant there anyway.
+            cap = h_max * (max(dp, 1e-3 * h_tip_p) / L) ** expo
             return min(cap, max(h_tip_p, k * dp))
 
         f_ctrl = pb.tip_map_control_fraction
@@ -575,7 +577,7 @@ class MappedTipMesh(GmshTemplate):
         # Physical cap h_max expressed in mapped units: h' = h (d'/d) = h_max (d'/L)^((a-1)/a).
         field = self.add_mesh_size_field(
             "MathEval",
-            F=f"min({h_max!r}*(max(F{dist},1e-300)/{L!r})^({expo!r}), max({h_tip_p!r}, {k!r}*F{dist}))",
+            F=f"min({h_max!r}*(max(F{dist},{1e-3 * h_tip_p!r})/{L!r})^({expo!r}), max({h_tip_p!r}, {k!r}*F{dist}))",
         )
         self.set_mesh_size_background_field(field)
         print(f"MESH GEOMETRY: {kind}, {len(iface_p)} interface + {len(axis_p)} axis control points, "
