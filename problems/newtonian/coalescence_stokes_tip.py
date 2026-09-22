@@ -676,6 +676,7 @@ class StokesTipCoalescence(Problem):
         gmsh_random_factor: float = 1e-9,
         tip_map_outer: float = 0.0,
         tip_map_core: float = 1e3,
+        max_residuals: float = 1e10,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -737,6 +738,8 @@ class StokesTipCoalescence(Problem):
         # Composite map: outer exponent (0 = same as tip_map_alpha) beyond tip_map_core tip radii.
         self.tip_map_outer = float(tip_map_outer)
         self.tip_map_core = float(tip_map_core)
+        # oomph-lib Newton residual cap; scales with 1/(Z0 S^2) like the tolerance.
+        self.max_residuals_cap = float(max_residuals)
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
         self._needs_tip_refine = False
@@ -798,6 +801,7 @@ class StokesTipCoalescence(Problem):
             self.set_scaling(spatial=self.S)
         self.set_output_directory(str(self.output_root / "pyoomph"))
         self.newton_solver_tolerance = self.newton_tolerance
+        self.max_residuals = self.max_residuals_cap
         self.max_newton_iterations = 12
         if self.tip_refine:
             self.max_refinement_level = 20
