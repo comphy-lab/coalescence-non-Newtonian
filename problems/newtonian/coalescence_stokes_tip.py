@@ -539,7 +539,29 @@ class MappedTipMesh(GmshTemplate):
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
             poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
-            pieces = self._q2_pieces(poly)
+            # Apex zone: the nodes within tip_apex_zone lagged radii of the apex are noise
+            # dominated (see neck_state); replace them by the circle through the apex, with
+            # centre on the symmetry plane, that passes exactly through the first vertex beyond
+            # the zone (chord construction), so the fresh mesh starts from a clean apex.
+            z_apex = pb.tip_apex_zone * pb.tip_radius_lagged
+            j = 0
+            while j + 2 < len(poly) and poly[j][1] < z_apex:
+                j += 2
+            if j > 0 and pb.neck_frame:
+                xt = poly[0][0]
+                xj, zj = poly[j]
+                dx = xj - xt
+                if dx > 0.0:
+                    rc = (dx * dx + zj * zj) / (2.0 * dx)
+                    cx = xt + rc
+                    theta_j = math.atan2(zj, xj - cx)
+                    apex = self._arc_piece(cx, 0.0, rc, math.pi, theta_j)
+                    pieces = [apex] + self._q2_pieces(poly[j:])
+                    pb._apex_arc = {"nodes_replaced": j, "radius": rc, "z_apex": z_apex}
+                else:
+                    pieces = self._q2_pieces(poly)
+            else:
+                pieces = self._q2_pieces(poly)
             kind = "remesh"
         T = r_neck                                  # tip in frame coordinates (solver units)
         r_neck_phys = r_neck * S + shift
@@ -653,6 +675,7 @@ class MappedTipMesh(GmshTemplate):
             "alpha": a,
             "n_interface_points": len(iface_p),
             "n_axis_points": len(axis_p),
+            "apex_arc": dict(getattr(pb, "_apex_arc", {})),
         }
 
 class StokesTipCoalescence(Problem):
@@ -702,6 +725,7 @@ class StokesTipCoalescence(Problem):
         tip_map_core: float = 1e3,
         max_residuals: float = 1e10,
         extra_newton_iterations: int = 0,
+        tip_apex_zone: float = 0.05,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -766,8 +790,12 @@ class StokesTipCoalescence(Problem):
         # oomph-lib Newton residual cap; scales with 1/(Z0 S^2) like the tolerance.
         self.max_residuals_cap = float(max_residuals)
         self.extra_newton_iterations = int(extra_newton_iterations)
+        # Apex zone (in lagged tip radii) whose nodes are noise-dominated: excluded from the
+        # tip fit and replaced by the exact circle through the apex at each remesh.
+        self.tip_apex_zone = float(tip_apex_zone)
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
+        self._apex_arc = {}
         self._needs_tip_refine = False
         self.n_refine_events = 0
         self._thin_boost = 1.0
@@ -1032,6 +1060,10 @@ class StokesTipCoalescence(Problem):
         # radius on the mapped mesh (run 36), and a window in lagged radii collapses once the
         # tip radius grows again as R_min^3 (run 37: 5.6e-14 read for a 1.4e-12 tip).
         near = [i0]
+        # Nodes within tip_apex_zone lagged radii of the apex carry position noise larger
+        # than their sagitta (R0=1e-6 run 61: ~1e-18 solver units against ~1e-23) and are
+        # excluded from the fit.
+        z_apex = self.tip_apex_zone * self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
         for i in order[1:]:
             # Walk outwards in distance and stop at the first node beyond the angle; nodes
             # far up the drop near the axis have |r - R_min| small and must not qualify.
@@ -1040,6 +1072,8 @@ class StokesTipCoalescence(Problem):
                 continue
             if math.atan2(abs(r[i] - p0[0]), z[i] - p0[1]) > self.tip_fit_angle:
                 break
+            if z[i] - p0[1] < z_apex:
+                continue
             near.append(i)
         if len(near) < 7:
             near = order[: min(7, n)]
