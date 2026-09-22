@@ -483,8 +483,9 @@ class MappedTipMesh(GmshTemplate):
         h_max = pb.h_max / S
         h_tip_phys = pb.current_h_tip()
 
+        shift = pb.frame_shift_phys                 # X = r - shift (0 in the laboratory frame)
         if self.is_first_time():
-            r_neck = pb.R0 / S
+            r_neck = (pb.R0 - shift) / S
             r0, z0 = pb.R0, pb.Z0
             _, zc = sphere_centre(r0, z0)
             jr, jz = sphere_bridge_junction(r0, z0)
@@ -508,16 +509,18 @@ class MappedTipMesh(GmshTemplate):
                 a_next = min(math.pi / 2, ang + da)
                 pieces.append(self._arc_piece(0.0, zc, 1.0, ang, a_next))
                 ang = a_next
+            if shift:
+                pieces = [(lambda t, ev=ev: (ev(t)[0] - shift, ev(t)[1])) for ev in pieces]
             kind = "initial"
         else:
-            poly = pb.interface_polyline()
+            poly = pb.interface_polyline()          # frame coordinate X
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
-            poly[-1] = (0.0, z_pole)
+            poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
             pieces = self._q2_pieces(poly)
             kind = "remesh"
-        T = r_neck
-        r_neck_phys = r_neck * S
+        T = r_neck                                  # tip in frame coordinates (solver units)
+        r_neck_phys = r_neck * S + shift
 
         self._T, self._alpha, self._L = T, a, L
         b = pb.tip_map_outer if pb.tip_map_outer > 0 else a
@@ -562,13 +565,13 @@ class MappedTipMesh(GmshTemplate):
         t_geo = time.time()
         iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p), h_floor_p),
                                        shrink_start=False)
-        # Axis r = 0 from the pole to the origin: straight physically, curved in the map.
+        # Axis r = 0 (X = -shift) from the pole to the origin: straight, curved in the map.
         axis_pieces = []
         z = z_pole
         while z > 0.0:
             dz = 0.5 * min(pb.h_max, max(h_tip_phys, k * math.hypot(r_neck_phys, z)))
             z_next = max(0.0, z - dz)
-            axis_pieces.append(self._line_piece((0.0, z), (0.0, z_next)))
+            axis_pieces.append(self._line_piece((-shift, z), (-shift, z_next)))
             z = z_next
         axis_p = self._control_points(axis_pieces, S, lambda p: f_ctrl * size_mapped(p))
         fine = []
@@ -593,15 +596,14 @@ class MappedTipMesh(GmshTemplate):
         # perturbation is the meshing floor (run 49: surface returned empty at 7e-12).
         self.set_gmsh_parameter("Mesh.RandomFactor", pb.gmsh_random_factor)
 
-        self._shift_s = pb.frame_shift_phys / S
-        sh = self._shift_s
-        p_n = self.point(T - sh, 0.0, consider_spatial_scale=False)
-        p_t = self.point(iface_p[-1][0] - sh, iface_p[-1][1], consider_spatial_scale=False)
-        p_o = self.point(axis_p[-1][0] - sh, axis_p[-1][1], consider_spatial_scale=False)
+        self._shift_s = 0.0          # geometry is already in frame coordinates
+        p_n = self.point(T, 0.0, consider_spatial_scale=False)
+        p_t = self.point(*iface_p[-1], consider_spatial_scale=False)
+        p_o = self.point(*axis_p[-1], consider_spatial_scale=False)
         assert math.hypot(iface_p[-1][0] - axis_p[0][0], iface_p[-1][1] - axis_p[0][1]) < 1e-9 * L, "pole mismatch"
-        inner = [self.point(x - sh, y, consider_spatial_scale=False) for (x, y) in iface_p[1:-1]]
+        inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in iface_p[1:-1]]
         interface = self.spline([p_n, *inner, p_t], name="interface", with_macro_element=False)
-        ax_inner = [self.point(x - sh, y, consider_spatial_scale=False) for (x, y) in axis_p[1:-1]]
+        ax_inner = [self.point(x, y, consider_spatial_scale=False) for (x, y) in axis_p[1:-1]]
         axis = self.spline([p_t, *ax_inner, p_o], name="axis", with_macro_element=False)
         plane = self.line(p_o, p_n, name="plane")
         self.plane_surface(plane, interface, axis, name="drop")
@@ -873,7 +875,10 @@ class StokesTipCoalescence(Problem):
         data = MeshDataCache(tesselate_tri=False, nondimensional=False).get_data(
             self.get_mesh("drop/interface")
         )
-        r = data.get_data("coordinate_x") + self.frame_shift_phys
+        # Frame coordinate X (= r - R_shift in the neck frame): all tip-local geometry is done
+        # in X; adding the shift first would round the tip away (eps R_neck ~ 2e-22 against
+        # innermost-chord sagittas ~1e-23 at a 1e-18 tip, runs 48-55).
+        r = data.get_data("coordinate_x")
         z = data.get_data("coordinate_y")
         u = data.get_data("velocity_x")
         v = data.get_data("velocity_y")
@@ -886,7 +891,7 @@ class StokesTipCoalescence(Problem):
         segs, _ = data.get_interface_line_segments()
         pts = data.get_coordinates()
         segs = sort_line_segments(pts, segs, sort_along_axis="y+", whom="interface")
-        poly = [(float(pts[0, i]) + self.frame_shift_phys, float(pts[1, i])) for seg in segs for i in seg]
+        poly = [(float(pts[0, i]), float(pts[1, i])) for seg in segs for i in seg]
         # Remove consecutive duplicates that segment joins produce.
         out: list[tuple[float, float]] = []
         for p in poly:
@@ -991,7 +996,7 @@ class StokesTipCoalescence(Problem):
         on_plane = [i for i in range(n) if abs(z[i]) <= 1e-30]
         i0 = max(on_plane, key=lambda i: r[i]) if on_plane else int(z.argmin())
         p0 = (float(r[i0]), float(z[i0]))
-        rmin = p0[0]
+        rmin = p0[0] + self.frame_shift_phys      # physical neck radius
         # Least-squares circle over the interface nodes within ~1 lagged tip radius of the
         # neck (at least the five nearest).  Far more robust than a three-node circle when the
         # element size at the tip varies between remeshes.
@@ -1038,7 +1043,7 @@ class StokesTipCoalescence(Problem):
         }
 
     def bridge_half_height(self, rmin: float, poly: list[tuple[float, float]]) -> float:
-        target = 1.05 * rmin
+        target = 1.05 * rmin - self.frame_shift_phys      # poly is in the frame coordinate
         for (r1, z1), (r2, z2) in zip(poly[:-1], poly[1:]):
             if (r1 - target) * (r2 - target) <= 0.0 and r1 != r2:
                 w = (target - r1) / (r2 - r1)
@@ -1091,7 +1096,7 @@ class StokesTipCoalescence(Problem):
             fh.write(f"# t={state['t']} R_min={state['R_min']} two_H={state['two_H']}\n")
             fh.write("r z\n")
             for r, z in poly:
-                fh.write(f"{r:.16e} {z:.16e}\n")
+                fh.write(f"{r + self.frame_shift_phys:.16e} {z:.16e}\n")
 
     # ---------------------------------------------------------- h-refinement
     def refine_tip(self) -> int:
