@@ -345,6 +345,8 @@ class MappedTipMesh(GmshTemplate):
         self._dc = float("inf")
         self._dcp = float("inf")
         self._A = 1.0
+        self._linear_core_d = 0.0
+        self._linear_core_g = 0.0
 
     # ---------------------------------------------------------------- the map
     # Composite radial map: exponent alpha inside the core d <= d_c (alpha = 1/2 makes the
@@ -354,11 +356,24 @@ class MappedTipMesh(GmshTemplate):
     # ratio of model size to mapped tip element that Gmsh must resolve (run 53: eleven decades
     # at the asymptotic R0=1e-6 tip is beyond its floor; beta = 0.4 gains a factor 40).
     def _g(self, d: float) -> float:
+        if self._linear_core_d > 0 and d <= self._linear_core_d:
+            t = d / self._linear_core_d
+            a = self._alpha
+            return self._linear_core_g * ((3.0 - a) * t + (a - 1.0) * t**3) / 2.0
         if d <= self._dc:
             return (self._L ** (1.0 - self._alpha)) * d ** self._alpha
         return self._A * d ** self._beta
 
     def _ginv(self, dp: float) -> float:
+        if self._linear_core_d > 0 and dp <= self._linear_core_g:
+            lo, hi = 0.0, self._linear_core_d
+            for _ in range(50):
+                mid = (lo + hi) / 2.0
+                if self._g(mid) < dp:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2.0
         if dp <= self._dcp:
             return (dp / self._L ** (1.0 - self._alpha)) ** (1.0 / self._alpha)
         return (dp / self._A) ** (1.0 / self._beta)
@@ -572,6 +587,13 @@ class MappedTipMesh(GmshTemplate):
         self._dc = pb.tip_map_core * rho if b != a else float("inf")
         self._dcp = (L ** (1.0 - a)) * self._dc ** a if b != a else float("inf")
         self._A = (L ** (1.0 - a)) * self._dc ** (a - b) if b != a else 1.0
+        self._linear_core_d = pb.tip_map_linear_core * rho
+        if self._linear_core_d >= self._dc:
+            raise ValueError("linear tip core must remain inside the inner power-map region")
+        self._linear_core_g = (
+            (L ** (1.0 - a)) * self._linear_core_d**a
+            if self._linear_core_d > 0 else 0.0
+        )
         self._mapping = True
         # Double-precision floor.  Node coordinates near the tip carry an absolute error of
         # about eps*R_neck, so an interface element of size h on a tip of radius rho, whose
@@ -589,8 +611,8 @@ class MappedTipMesh(GmshTemplate):
         # more than their size in one step (R0=1e-6 run 44: an element expanded 155x at
         # h = 7e-13 R_neck).  Zero disables it; 1e-11 leaves R0 >= 1e-4 untouched.
         h_floor_phys = max(h_floor_phys, pb.tip_rel_floor * r_neck_phys)
-        h_floor_p = (L ** (1.0 - a)) * ((h_floor_phys / S) ** a)
-        h_tip_p = max((L ** (1.0 - a)) * (rho ** a) / pb.n_tip, h_floor_p)   # mapped tip size
+        h_floor_p = self._g(h_floor_phys / S)
+        h_tip_p = max(self._g(rho) / pb.n_tip, h_floor_p)   # mapped tip size
         expo = (a - 1.0) / a
 
         # Physical cap h_max in mapped units along the interface, h' = h_max * g(d)/d (the
@@ -723,8 +745,11 @@ class StokesTipCoalescence(Problem):
         gmsh_random_factor: float = 1e-9,
         tip_map_outer: float = 0.0,
         tip_map_core: float = 1e3,
+        tip_map_linear_core: float = 0.0,
         max_residuals: float = 1e10,
         extra_newton_iterations: int = 0,
+        min_newton_iterations: int = 0,
+        curvature_step_limit: float = 0.0,
         tip_apex_zone: float = 0.05,
     ):
         super().__init__()
@@ -787,9 +812,24 @@ class StokesTipCoalescence(Problem):
         # Composite map: outer exponent (0 = same as tip_map_alpha) beyond tip_map_core tip radii.
         self.tip_map_outer = float(tip_map_outer)
         self.tip_map_core = float(tip_map_core)
+        self.tip_map_linear_core = float(tip_map_linear_core)
+        if self.tip_map_linear_core < 0:
+            raise ValueError("tip_map_linear_core must be non-negative")
+        if self.tip_map_linear_core and not 0 < self.tip_map_alpha < 1:
+            raise ValueError("a linear tip core requires 0 < tip_map_alpha < 1")
         # oomph-lib Newton residual cap; scales with 1/(Z0 S^2) like the tolerance.
         self.max_residuals_cap = float(max_residuals)
-        self.extra_newton_iterations = int(extra_newton_iterations)
+        if extra_newton_iterations:
+            raise ValueError("post-step Newton changes BDF history; use min_newton_iterations")
+        self.min_newton_iterations = int(min_newton_iterations)
+        if not 0 <= self.min_newton_iterations <= 12:
+            raise ValueError("min_newton_iterations must be between 0 and 12")
+        self._newton_iteration = 0
+        self._newton_tolerance_before_gate = None
+        self.curvature_step_limit = float(curvature_step_limit)
+        if self.curvature_step_limit < 0:
+            raise ValueError("curvature_step_limit must be non-negative")
+        self._step_state_before_newton = None
         # Apex zone (in lagged tip radii) whose nodes are noise-dominated: excluded from the
         # tip fit and replaced by the exact circle through the apex at each remesh.
         self.tip_apex_zone = float(tip_apex_zone)
@@ -837,11 +877,17 @@ class StokesTipCoalescence(Problem):
         return self.n_tip * h_floor
 
     def tip_unresolved(self, rho: float) -> bool:
-        """True while the measured tip radius is within a factor 4 of the resolvable one: the
-        fit then reads mesh noise and must drive neither remeshing nor the time step (R0=1e-6
-        run 45 thrashed between 'shrank' and 'grew' remeshes at one instant)."""
+        """Reject tip measurements below the precision floor of the active map.
+
+        The historical power map clusters its first node quadratically, so it
+        needs a factor-four margin.  The linear-core map places that node at
+        O(rho/n_tip); a factor of 1.5 above the recorded 100-epsilon size floor
+        keeps its sagitta above 225 epsilon while retaining the published
+        R0=1e-6 startup curvature in the resolvable range.
+        """
         rr = self.rho_resolvable()
-        return rr > 0.0 and (not math.isfinite(rho) or rho < 4.0 * rr)
+        margin = 1.5 if self.tip_map_linear_core > 0 else 4.0
+        return rr > 0.0 and (not math.isfinite(rho) or rho < margin * rr)
 
     def define_problem(self):
         if self.neck_frame:
@@ -1265,6 +1311,8 @@ class StokesTipCoalescence(Problem):
         translation, which is what makes u*dt >> tip radius steps converge.  After an
         impulsive restart the two history levels coincide and the predictor is inert.
         """
+        self._newton_iteration = 0
+        self._newton_tolerance_before_gate = self.newton_solver_tolerance
         if self._predict_now and self._dt_prev is not None and self._dt_prev > 0:
             try:
                 x1 = numpy.asarray(self.get_history_dofs(1), dtype=float)
@@ -1275,9 +1323,37 @@ class StokesTipCoalescence(Problem):
                 print(f"predictor skipped: {exc!r}", flush=True)
         super().actions_before_newton_solve()
 
+    def actions_before_newton_step(self):
+        self._newton_iteration += 1
+        super().actions_before_newton_step()
+
+    def actions_before_newton_convergence_check(self):
+        # Keep additional iterations in the original unsteady solve, before
+        # pyoomph advances BDF history or performs a pending remesh.
+        if self._newton_iteration < self.min_newton_iterations:
+            self.newton_solver_tolerance = 0.0
+        elif self._newton_tolerance_before_gate is not None:
+            self.newton_solver_tolerance = self._newton_tolerance_before_gate
+        super().actions_before_newton_convergence_check()
+
     # -------------------------------------------------------------- remeshing
     def actions_after_newton_solve(self):
         if not self.last_newton_step_failed() and self._template is not None:
+            if self.curvature_step_limit > 0 and self._step_state_before_newton is not None:
+                previous = self._step_state_before_newton["two_H"]
+                current_state = self.neck_state()
+                current = current_state["two_H"]
+                previous_rho = self._step_state_before_newton["tip_radius"]
+                current_rho = current_state["tip_radius"]
+                if not all(math.isfinite(v) and v > 0 for v in (previous_rho, current_rho)):
+                    raise RuntimeError("tip radius is invalid after Newton solve")
+                if not (self.tip_unresolved(previous_rho) or self.tip_unresolved(current_rho)):
+                    change = abs(current - previous) / max(abs(previous), 1e-300)
+                    if not math.isfinite(change) or change > self.curvature_step_limit:
+                        raise RuntimeError(
+                            f"tip curvature changed {change:.3g} in one step "
+                            f"(limit {self.curvature_step_limit:.3g})"
+                        )
             reason = self._remesh_reason()
             if reason is not None:
                 self._pending_remesh_reason = reason
@@ -1425,16 +1501,12 @@ class StokesTipCoalescence(Problem):
                 snapshot = self._dof_snapshot()
                 self._dt = dt
                 self._predict_now = True
+                self._step_state_before_newton = st
                 try:
                     self.solve(timestep=dt, do_not_set_IC=True)
                     # The max-residual test is dominated by far-field rows whose weights exceed
                     # the tip rows by ~20 decades at R0=1e-6, so Newton stops with the tip
                     # equations unconverged and a grid-scale wrinkle grows on the tip (run 58).
-                    # Re-enter oomph-lib's Newton on the same time-discrete system (history
-                    # already shifted, weights unchanged); always_take_one_newton_step makes each
-                    # call do at least one more quadratic iteration.
-                    for _extra in range(self.extra_newton_iterations):
-                        _pyoomph.Problem.newton_solve(self, 0)
                     ok = True
                     break
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
@@ -1464,6 +1536,9 @@ class StokesTipCoalescence(Problem):
                     dt *= 0.3
                 finally:
                     self._predict_now = False
+                    self._step_state_before_newton = None
+                    if self._newton_tolerance_before_gate is not None:
+                        self.newton_solver_tolerance = self._newton_tolerance_before_gate
             if not ok:
                 status = "newton_failure"
                 break
@@ -1501,6 +1576,9 @@ class StokesTipCoalescence(Problem):
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,
+                "min_newton_iterations": self.min_newton_iterations,
+                "curvature_step_limit": self.curvature_step_limit,
+                "tip_map_linear_core": self.tip_map_linear_core,
                 "R_stop": self.R_stop,
             },
         }
