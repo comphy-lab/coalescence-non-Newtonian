@@ -1031,6 +1031,9 @@ class StokesTipCoalescence(Problem):
         self._quality_recovery_start = R_start
         self.n_quality_recovery_events = 0
         self._predict_now = False
+        # True from a remesh (or a restart, whose first mesh is a remesh) until the first
+        # accepted step on that mesh.
+        self._fresh_mesh = self._restart is not None
         self._wall0 = time.time()
 
     # ------------------------------------------------------------------ mesh
@@ -1670,7 +1673,13 @@ class StokesTipCoalescence(Problem):
             # invalid tip otherwise reaches Gmsh's edge recovery, which can
             # loop on a self-intersecting upper-interface spline.
             validate_upper_interface(self.interface_polyline(), self.R0)
-            if self.curvature_step_limit > 0 and self._step_state_before_newton is not None:
+            # The first step on a freshly remeshed interface starts from an unrelaxed
+            # reconstruction whose tip re-equilibrates on the capillary time of the tip
+            # (~rho, far below any dt), so its curvature change measures the remesh, not the
+            # step (production R0=1e-6 run: 0.39 -> 0.21 while dt fell 400-fold after the
+            # quality remesh at R=1.718e-6).  The geometry and Newton gates still apply.
+            if (self.curvature_step_limit > 0 and self._step_state_before_newton is not None
+                    and not self._fresh_mesh):
                 previous = self._step_state_before_newton["two_H"]
                 current_state = self.neck_state()
                 current = current_state["two_H"]
@@ -1759,6 +1768,7 @@ class StokesTipCoalescence(Problem):
         self._dt_prev = None
         self._step_at_remesh = self._steps
         self._needs_tip_refine = True
+        self._fresh_mesh = True
         self.n_remesh += 1
         st_new = self.neck_state()
         st_old = getattr(self, "_pre_remesh_state", {})
@@ -1862,6 +1872,7 @@ class StokesTipCoalescence(Problem):
                 dt = self.limit_dt_after_history_reset(dt, st)
                 self._regrow = True
             remesh_before_step = self.n_remesh
+            fresh_at_start = self._fresh_mesh
             quality_remesh_used = False
             for _attempt in range(6):
                 snapshot = self._dof_snapshot()
@@ -1947,6 +1958,8 @@ class StokesTipCoalescence(Problem):
             if not ok:
                 status = "newton_failure"
                 break
+            if fresh_at_start and self.n_remesh == remesh_before_step:
+                self._fresh_mesh = False
             self._dt_prev = None if self.n_remesh != remesh_before_step else dt
             self._dt = dt
             self._steps += 1
