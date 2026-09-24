@@ -729,16 +729,24 @@ class MappedTipMesh(GmshTemplate):
         expo_o = (b - 1.0) / b
         A = self._A
 
-        def size_mapped(p):
+        # Interface grading: a finer tip-distance grading on the interface itself, relaxing to
+        # the bulk grading k away from it.  The gap ahead of the neck is a nearly flat film of
+        # height ~0.1 R_min^2 over ~0.05 R_min, i.e. its slope scales with R_min; a grid-scale
+        # interface-velocity error eps*U, balanced by capillary relaxation of grid-scale modes,
+        # leaves a wiggle of amplitude ~eps*U*h independent of R_min, which reaches the gap height
+        # at R0=1e-6 but not at R0>=1e-4.  Refining h on the interface lowers that amplitude.
+        ks = pb.interface_grading if 0.0 < pb.interface_grading < k else k
+
+        def size_mapped(p, on_interface=False):
             dp = max(math.hypot(p[0] - T, p[1]), 1e-3 * h_tip_p)   # clamp: negative powers
             cap = h_max * (dp / L) ** expo
             if b != a:
                 cap = min(cap, h_max * A * (dp / A) ** expo_o)
-            return min(cap, max(h_tip_p, k * dp))
+            return min(cap, max(h_tip_p, (ks if on_interface else k) * dp))
 
         f_ctrl = pb.tip_map_control_fraction
         t_geo = time.time()
-        iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p), h_floor_p),
+        iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p, True), h_floor_p),
                                        shrink_start=False)
         if any(y < -100.0 * math.ulp(max(abs(y), h_tip_p)) for _, y in iface_p):
             raise RuntimeError("mapped upper-interface control point crosses below the symmetry plane")
@@ -792,6 +800,12 @@ class MappedTipMesh(GmshTemplate):
         if b != a:
             cap_expr = f"min({cap_expr}, {h_max * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
         size_expr = f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))"
+        if ks < k:
+            # Distance to the interface control points (spaced f_ctrl of the local interface
+            # size, so within a fraction of an element of the curve) in the mapped plane.
+            dist_iface = self.add_mesh_size_field("Distance", PointsList=[p_n, *inner, p_t])
+            size_expr = (f"min({size_expr}, max({h_tip_p!r}, {ks!r}*F{dist})"
+                         f" + {pb.interface_size_growth!r}*F{dist_iface})")
         refinement_receipt = []
         for x, z, clearance_ratio in shallow_targets:
             centre = self._fwd(x / S, z / S)
@@ -817,6 +831,7 @@ class MappedTipMesh(GmshTemplate):
             "n_axis_points": len(axis_p),
             "apex_arc": dict(getattr(pb, "_apex_arc", {})),
             "shallow_interface_refinement": refinement_receipt,
+            "interface_grading": ks,
         }
 
 class StokesTipCoalescence(Problem):
@@ -872,6 +887,8 @@ class StokesTipCoalescence(Problem):
         curvature_step_limit: float = 0.0,
         line_search: bool = False,
         tip_apex_zone: float = 0.05,
+        interface_grading: float = 0.0,
+        interface_size_growth: float = 0.3,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -958,6 +975,12 @@ class StokesTipCoalescence(Problem):
         # Apex zone (in lagged tip radii) whose nodes are noise-dominated: excluded from the
         # tip fit and replaced by the exact circle through the apex at each remesh.
         self.tip_apex_zone = float(tip_apex_zone)
+        # Tip-distance grading on the interface (MappedTipMesh); 0 = the bulk grading.  The
+        # size grows away from the interface at interface_size_growth per unit mapped distance.
+        self.interface_grading = float(interface_grading)
+        self.interface_size_growth = float(interface_size_growth)
+        if self.interface_grading < 0 or self.interface_size_growth <= 0:
+            raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
         self.frame_shift_phys = float(R0) if neck_frame else 0.0
         self._R_shift = None
         self._apex_arc = {}
