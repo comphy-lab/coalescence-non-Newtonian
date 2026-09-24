@@ -44,6 +44,7 @@ def main() -> int:
     ap.add_argument("--line-search", action="store_true", help="use pyoomph's globally convergent Newton line search")
     ap.add_argument("--audit-blocks", action="store_true", help="stop after one accepted step and audit frozen Stokes and complement Jacobian blocks")
     ap.add_argument("--audit-dt", type=float, default=None, help="fixed BDF1 timestep for --audit-blocks")
+    ap.add_argument("--seed-frozen-stokes", action="store_true", help="seed algebraic Stokes velocity/pressure on the untouched initial geometry")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
@@ -115,6 +116,12 @@ def main() -> int:
         curvature_step_limit=args.curvature_step_limit,
     )
     pb.quiet()
+    if args.seed_frozen_stokes:
+        if float(bridge["R0"]) != 1e-6 or not args.neck_frame_moving:
+            raise SystemExit("frozen-Stokes seed is limited to the exact R0=1e-6 moving-frame case")
+        from runners.stokes_block_audit import seed_frozen_stokes
+        pb.initialise()
+        seed_frozen_stokes(pb, args.out, args.dt_initial)
     if args.audit_blocks:
         if args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6:
             raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")

@@ -52,6 +52,7 @@ from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
 from .geometry import sphere_bridge_junction, sphere_centre
+from .q2_geometry import signed_jacobian_range
 
 
 def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None:
@@ -1091,6 +1092,39 @@ class StokesTipCoalescence(Problem):
             return float(self.get_ode("globals").get_value("R_neck", as_float=True))
         return self.frame_shift_phys
 
+    def validate_domain_geometry(self) -> None:
+        """Reject a folded or plane-crossing bulk mesh before it is accepted."""
+        if not self.neck_frame_moving:
+            return
+        shift = self._frame_shift_now()
+        tolerance = max(100.0 * math.ulp(shift), 1e-3 * self.current_h_tip())
+        for node in self.get_mesh("drop").nodes():
+            r = self.S * node.x(0) + shift
+            z = self.S * node.x(1)
+            if not (math.isfinite(r) and math.isfinite(z)) or r < -tolerance or z < -tolerance:
+                raise RuntimeError(f"moving-frame bulk node left the physical quadrant: r={r:.6e}, z={z:.6e}")
+        for node in self.get_mesh("drop/axis").nodes():
+            if abs(self.S * node.x(0) + shift) > tolerance:
+                raise RuntimeError("moving-frame axis node left r=0")
+        for element in self.get_mesh("drop").elements():
+            if element.nnode() != 6:
+                raise RuntimeError("moving-frame geometry gate expects six-node Q2 triangles")
+            local = numpy.array([element.local_coordinate_of_node(i) for i in range(6)])
+            nodes = [element.node_pt(i) for i in range(6)]
+            reference = numpy.array([[node.x_lagr(0), node.x_lagr(1)] for node in nodes])
+            current = numpy.array([[node.x(0), node.x(1)] for node in nodes])
+            ref_min, ref_max = signed_jacobian_range(local, reference)
+            cur_min, cur_max = signed_jacobian_range(local, current)
+            tolerance_j = 100 * numpy.finfo(float).eps * max(abs(ref_min), abs(ref_max))
+            if ref_min > tolerance_j:
+                valid = cur_min > tolerance_j
+            elif ref_max < -tolerance_j:
+                valid = cur_max < -tolerance_j
+            else:
+                raise RuntimeError("moving-frame reference Q2 element is singular or folded")
+            if not valid:
+                raise RuntimeError("moving-frame Q2 element has a nonpositive signed Jacobian")
+
     def _snap_moving_axis(self, radius: float | None = None) -> None:
         """Put mapped axis nodes and their reference coordinates exactly at r=0."""
         if not self.neck_frame_moving:
@@ -1493,6 +1527,7 @@ class StokesTipCoalescence(Problem):
     # -------------------------------------------------------------- remeshing
     def actions_after_newton_solve(self):
         if not self.last_newton_step_failed() and self._template is not None:
+            self.validate_domain_geometry()
             # A raw-residual pass is insufficient to admit the geometry.  An
             # invalid tip otherwise reaches Gmsh's edge recovery, which can
             # loop on a self-intersecting upper-interface spline.
@@ -1570,6 +1605,7 @@ class StokesTipCoalescence(Problem):
     def actions_after_remeshing(self):
         super().actions_after_remeshing()
         self._snap_moving_axis()
+        self.validate_domain_geometry()
         # Stokes carries no velocity history, and the interpolated position history of a
         # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
         # mesh velocity.  Restart the time integrator impulsively from the new geometry
@@ -1629,7 +1665,8 @@ class StokesTipCoalescence(Problem):
         return max(dt, self.dt_initial)
 
     def run_campaign(self, *, max_steps: int = 100000, max_wall_s: float | None = None) -> dict[str, Any]:
-        self.initialise()
+        if not self.is_initialised():
+            self.initialise()
         self.refine_tip()
         st = self.neck_state()
         self.write_row(st, 0.0, None)

@@ -12,10 +12,22 @@ from pyoomph.solvers.scipy import SuperLUSerial
 from scipy.sparse import csr_matrix
 
 from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence, validate_upper_interface
+from problems.newtonian.q2_geometry import signed_jacobian_range
 from runners.stokes_block_audit import _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):
+    def test_signed_q2_jacobian_catches_midside_fold_with_unchanged_vertices(self) -> None:
+        import numpy as np
+
+        local = np.array([[0, 0], [1, 0], [0, 1], [0.5, 0], [0.5, 0.5], [0, 0.5]])
+        folded = local.copy()
+        folded[3, 1] = 0.5
+        self.assertEqual(signed_jacobian_range(local, local), (1.0, 1.0))
+        minimum, maximum = signed_jacobian_range(local, folded)
+        self.assertLess(minimum, 0)
+        self.assertGreater(maximum, 0)
+
     def test_linear_core_joins_power_map_with_value_and_slope_continuity(self) -> None:
         mesh = MappedTipMesh()
         mesh._T = 1.0
@@ -55,6 +67,23 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_moving_frame_rejects_bulk_node_below_plane(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(
+                R0=1e-6, Z0=5e-13, output_dir=out, spatial_scale=1e-6,
+                tip_map_alpha=0.5, h_tip_floor=1e-30,
+                neck_frame=True, neck_frame_moving=True,
+            )
+            interior = Mock()
+            interior.x.side_effect = [5e-5, -7e-5]
+            bulk = Mock()
+            bulk.nodes.return_value = [interior]
+            with patch.object(problem, "_frame_shift_now", return_value=1e-6), patch.object(
+                problem, "get_mesh", return_value=bulk
+            ):
+                with self.assertRaisesRegex(RuntimeError, "left the physical quadrant"):
+                    problem.validate_domain_geometry()
+
     def test_block_audit_uses_serial_superlu_without_mpi(self) -> None:
         import numpy as np
 

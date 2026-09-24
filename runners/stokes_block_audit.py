@@ -93,6 +93,46 @@ def _mesh_peak_location(problem, dof: int, axis: int, correction_solver: float) 
     return result
 
 
+def seed_frozen_stokes(problem, output_dir: Path, initial_dt: float) -> dict:
+    """Solve only algebraic Stokes fields on the untouched t=0 geometry."""
+    if not problem.is_initialised() or initial_dt <= 0:
+        raise RuntimeError("Stokes seed requires an initialised problem and positive dt")
+    problem.initialise_dt(initial_dt)
+    problem.assign_initial_values_impulsive()
+    fluid, other, _, resolved = _field_indices(problem)
+    U0 = np.asarray(problem.get_current_dofs()[0], dtype=np.float64).copy()
+    frozen_hash = _digest(U0[other])
+    F0, J0 = problem.assemble_jacobian(with_residual=True)
+    F0 = np.asarray(F0, dtype=np.float64)
+    A = J0[fluid, :][:, fluid].tocsr()
+    df = _solve_serial_block(problem.get_la_solver(), A, -F0[fluid])
+    if not np.all(np.isfinite(df)):
+        raise RuntimeError("non-finite initial frozen-Stokes correction")
+    U1 = U0.copy()
+    U1[fluid] += df
+    problem.set_current_dofs(U1)
+    problem.invalidate_cached_mesh_data()
+    F1 = np.asarray(problem.get_residuals(), dtype=np.float64)
+    result = {
+        "schema": "frozen-stokes-seed-v1", "R0": problem.R0, "Z0": problem.Z0,
+        "initial_dt": initial_dt, "ndof": len(U0), "fluid_dofs": len(fluid),
+        "residual_before_max": float(np.max(np.abs(F0[fluid]))),
+        "residual_after_max": float(np.max(np.abs(F1[fluid]))),
+        "componentwise_backward_error": _backward_error(A, df, -F0[fluid]),
+        "correction_max_by_field": _max_by_field(df, fluid, resolved),
+        "frozen_geometry_and_neck_unchanged": _digest(U1[other]) == frozen_hash,
+        "neck_after_seed": problem.neck_state(),
+    }
+    (output_dir / "seed-stokes.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    if not result["frozen_geometry_and_neck_unchanged"] or result["residual_after_max"] > 1e-6 * max(result["residual_before_max"], 1):
+        raise RuntimeError("initial frozen-Stokes seed failed its algebraic or geometry gate")
+    problem.assign_initial_values_impulsive()
+    problem.timestepper.set_num_unsteady_steps_done(0)
+    problem._taken_already_an_unsteady_step = False
+    problem._dt_prev = None
+    return result
+
+
 def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
     """Apply one frozen-Stokes correction, then one complementary correction."""
     if problem._steps != 1 or problem.n_remesh != 0 or audit_dt <= 0:
