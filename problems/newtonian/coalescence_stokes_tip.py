@@ -1664,6 +1664,12 @@ class StokesTipCoalescence(Problem):
             self._regrow = False
         return max(dt, self.dt_initial)
 
+    def limit_dt_after_history_reset(self, dt: float, st: dict[str, float]) -> float:
+        """Limit the first step only when tip nodes carry lab-frame translation."""
+        if not self.neck_frame_moving:
+            dt = min(dt, 20.0 * st["h_tip_now"] / max(abs(st["u_neck"]), 1e-3))
+        return max(dt, self.dt_initial)
+
     def run_campaign(self, *, max_steps: int = 100000, max_wall_s: float | None = None) -> dict[str, Any]:
         if not self.is_initialised():
             self.initialise()
@@ -1692,10 +1698,10 @@ class StokesTipCoalescence(Problem):
             dt = self.choose_dt(st)
             ok = False
             if self._dt_prev is None:
-                # Fresh integrator (after remesh, bisection or a rejected step): no predictor is
-                # available, so keep the first displacement within ~20 tip elements.
-                dt = min(dt, 20.0 * st["h_tip_now"] / max(abs(st["u_neck"]), 1e-3))
-                dt = max(dt, self.dt_initial)
+                # The lab-frame cap limits common neck translation relative to
+                # tip elements.  In the moving frame the apex X=0 carries no
+                # such translation, so retain the curvature/bridge ceilings.
+                dt = self.limit_dt_after_history_reset(dt, st)
                 self._regrow = True
             remesh_before_step = self.n_remesh
             for _attempt in range(6):
