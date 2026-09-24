@@ -1084,14 +1084,15 @@ class StokesTipCoalescence(Problem):
             return float(self.get_ode("globals").get_value("R_neck", as_float=True))
         return self.frame_shift_phys
 
-    def _snap_moving_axis(self) -> None:
+    def _snap_moving_axis(self, radius: float | None = None) -> None:
         """Put mapped axis nodes and their reference coordinates exactly at r=0."""
         if not self.neck_frame_moving:
             return
-        target = -self._frame_shift_now() / self.S
-        for node in self.get_mesh("drop/axis").nodes():
+        target = -(self._frame_shift_now() if radius is None else radius) / self.S
+        # _lookup_mesh is the pinned API's non-recursive path during initialise().
+        for node in self._lookup_mesh("drop/axis").nodes():
             node.set_x(0, target)
-        self.get_mesh("drop").set_lagrangian_nodal_coordinates()
+        self._lookup_mesh("drop").set_lagrangian_nodal_coordinates()
         self.invalidate_cached_mesh_data()
 
     def set_initial_condition(self, *args, **kwargs):
@@ -1099,7 +1100,7 @@ class StokesTipCoalescence(Problem):
         if self.neck_frame_moving:
             # The ODE initial value is now assigned.  Gmsh inverse-mapping can
             # leave axis nodes off r=0 by O(1e-11) at this case's scale.
-            self._snap_moving_axis()
+            self._snap_moving_axis(radius=self.R0)
             self.assign_initial_values_impulsive()
 
     def interface_polyline(self) -> list[tuple[float, float]]:
