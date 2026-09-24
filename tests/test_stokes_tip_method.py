@@ -13,7 +13,7 @@ from scipy.sparse import csr_matrix
 
 from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence, validate_upper_interface
 from problems.newtonian.q2_geometry import signed_jacobian_range
-from runners.stokes_block_audit import _solve_serial_block
+from runners.stokes_block_audit import _json_safe, _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):
@@ -67,6 +67,14 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_audit_receipt_serialises_nonfinite_diagnostics(self) -> None:
+        import json
+        import numpy as np
+
+        receipt = _json_safe({"residual": [np.float64(float("nan")), float("inf")]})
+        encoded = json.dumps(receipt, allow_nan=False)
+        self.assertIn("nonfinite", encoded)
+
     def test_moving_frame_rejects_bulk_node_below_plane(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             problem = StokesTipCoalescence(

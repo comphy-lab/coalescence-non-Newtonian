@@ -17,6 +17,18 @@ def _digest(values) -> str:
     return hashlib.sha256(np.asarray(values, dtype=np.float64).tobytes()).hexdigest()
 
 
+def _json_safe(value):
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"nonfinite": repr(value)}
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _backward_error(matrix, solution, rhs) -> float:
     numerator = np.abs(matrix @ solution - rhs)
     denominator = np.abs(matrix) @ np.abs(solution) + np.abs(rhs)
@@ -120,10 +132,12 @@ def seed_frozen_stokes(problem, output_dir: Path, initial_dt: float) -> dict:
         "residual_after_max": float(np.max(np.abs(F1[fluid]))),
         "componentwise_backward_error": _backward_error(A, df, -F0[fluid]),
         "correction_max_by_field": _max_by_field(df, fluid, resolved),
-        "frozen_geometry_and_neck_unchanged": _digest(U1[other]) == frozen_hash,
+        "frozen_geometry_and_neck_unchanged": (
+            _digest(np.asarray(problem.get_current_dofs()[0], dtype=np.float64)[other]) == frozen_hash
+        ),
         "neck_after_seed": problem.neck_state(),
     }
-    (output_dir / "seed-stokes.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    (output_dir / "seed-stokes.json").write_text(json.dumps(_json_safe(result), indent=2, allow_nan=False) + "\n")
     if not result["frozen_geometry_and_neck_unchanged"] or result["residual_after_max"] > 1e-6 * max(result["residual_before_max"], 1):
         raise RuntimeError("initial frozen-Stokes seed failed its algebraic or geometry gate")
     problem.assign_initial_values_impulsive()
@@ -181,7 +195,8 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
         problem.set_current_dofs(U1)
         problem.invalidate_cached_mesh_data()
         F1 = np.asarray(problem.get_residuals(), dtype=np.float64)
-        frozen_unchanged = (_digest(U1[other]) == result["frozen_state"]["complement_dofs_sha256"]
+        frozen_unchanged = (_digest(np.asarray(problem.get_current_dofs()[0], dtype=np.float64)[other])
+                            == result["frozen_state"]["complement_dofs_sha256"]
                             and _digest(problem.get_history_dofs(1)) == h1
                             and _digest(problem.get_history_dofs(2)) == h2)
         result["stokes_block"] = {
@@ -302,6 +317,8 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
         result["audit_error"] = repr(exc)
         raise
     finally:
-        problem.set_current_dofs(U0)
-        output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+        try:
+            problem.set_current_dofs(U0)
+        finally:
+            output.write_text(json.dumps(_json_safe(result), indent=2, allow_nan=False) + "\n")
     return result
