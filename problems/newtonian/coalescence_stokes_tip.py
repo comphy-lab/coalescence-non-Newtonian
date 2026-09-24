@@ -1440,6 +1440,8 @@ class StokesTipCoalescence(Problem):
         self.set_current_time(t, dimensional=False)
         for name in ("tip_radius_lagged", "rho_at_remesh", "rmin_at_remesh", "last_rmin", "frame_shift_phys"):
             setattr(self, name, remesh_state[name])
+        if self.neck_frame and not self.neck_frame_moving and self._R_shift is not None:
+            self._R_shift.value = self.frame_shift_phys / self.S
         if self._R_ref is not None:
             self._R_ref.value = remesh_state["R_ref"]
         self._pre_remesh_state = remesh_state["pre_remesh_state"]
