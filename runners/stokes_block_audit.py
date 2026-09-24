@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,32 @@ def _argmax_by_field(values, indices, resolved) -> dict[str, int]:
         if name not in result or candidate[0] > result[name][0]:
             result[name] = candidate
     return {name: index for name, (_, index) in result.items()}
+
+
+def _mesh_peak_location(problem, dof: int, axis: int, correction_solver: float) -> dict:
+    mesh = problem.get_mesh("drop")
+    location, node_type = problem._search_dof_in_mesh(mesh, dof)
+    result = {"dof": dof, "node_type": node_type,
+              "correction_solver": correction_solver,
+              "correction_physical_abs": abs(correction_solver) * problem.S}
+    if location is None:
+        return result
+    x0, y0 = float(location[0]), float(location[1])
+    result["frame_coordinate_solver"] = [x0, y0]
+    result["physical_coordinate"] = [problem.S * x0 + problem._frame_shift_now(), problem.S * y0]
+    nearest = float("inf")
+    for element in mesh.elements():
+        nodes = [element.node_pt(i) for i in range(element.nnode())]
+        if not any(node.variable_position_pt().eqn_number(axis) == dof for node in nodes):
+            continue
+        for node in nodes:
+            gap = math.hypot(node.x(0) - x0, node.x(1) - y0)
+            if gap > 1e-30:
+                nearest = min(nearest, gap)
+    if math.isfinite(nearest):
+        result["nearest_incident_node_gap_physical"] = nearest * problem.S
+        result["correction_over_nearest_gap"] = abs(correction_solver) / nearest
+    return result
 
 
 def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
@@ -161,6 +188,14 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
                 complement["mesh_correction_over_tip_element_bound"] = (
                     complement["mesh_correction_max_physical_abs"] / max(result["neck_before"]["h_tip_now"], 1e-300)
                 )
+                complement["mesh_peak_locations"] = {}
+                for field, axis in (("mesh_x", 0), ("mesh_y", 1)):
+                    peak_dof = complement["correction_argmax_dof_by_field"].get(field)
+                    if peak_dof is not None:
+                        local_index = int(np.flatnonzero(other == peak_dof)[0])
+                        complement["mesh_peak_locations"][field] = _mesh_peak_location(
+                            problem, peak_dof, axis, float(dg[local_index])
+                        )
                 complement["Rn_correction_over_u_dt_abs"] = (
                     complement["Rn_correction_physical_abs"]
                     / max(abs(result["stokes_block"]["neck_after_stokes"]["u_neck"]) * audit_dt, 1e-300)
