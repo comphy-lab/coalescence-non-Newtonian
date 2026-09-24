@@ -49,7 +49,7 @@ from pyoomph.equations.generic import (
     WeakContribution,
 )
 from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
-from pyoomph.expressions import grad, mesh_velocity, square_root
+from pyoomph.expressions import grad, mesh_velocity, square_root, evaluate_in_past
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
@@ -404,11 +404,15 @@ class NeckMovingFreeSurface(NavierStokesFreeSurface):
     vanishes for the exact solution (it multiplies the kinematic residual) and changes no physics.
     """
 
-    def __init__(self, neck_radius, kinematic_upwind: float = 0.0, upwind_velocity_floor: float = 1e-3):
+    def __init__(self, neck_radius, kinematic_upwind: float = 0.0, frame_speed=None,
+                 upwind_velocity_floor: float = 1e-3):
         super().__init__(surface_tension=1.0)
         self.neck_radius = neck_radius
         self.kinematic_upwind = float(kinematic_upwind)
+        self.frame_speed = frame_speed
         self.upwind_velocity_floor = float(upwind_velocity_floor)
+        if self.kinematic_upwind > 0 and frame_speed is None:
+            raise ValueError("kinematic upwinding needs the frame-speed parameter")
 
     def define_residuals(self):
         super().define_residuals()
@@ -426,9 +430,16 @@ class NeckMovingFreeSurface(NavierStokesFreeSurface):
             u = var("velocity")
             node_velocity = mesh_velocity() + vector(Rdot, 0)
             kinematic_residual = dot(node_velocity - u, n)
-            w_t = dot(u - node_velocity, t)
+            # Upwind direction and element length from the previous converged state, with the
+            # frame speed as an explicit per-step parameter: near the neck the nodes are held at
+            # fixed X, so the liquid moves past them at (u - U_frame e_r).t.  Lagging keeps the
+            # weight free of current unknowns (exact Jacobian) and survives the impulsive restart,
+            # which zeroes the history of mesh velocity and dR/dt but keeps the velocity.
+            n_old = evaluate_in_past(n, apply_on_others=True)
+            t_old = vector(-n_old[1], n_old[0])
+            w_t = dot(evaluate_in_past(u), t_old) - self.frame_speed * t_old[0]
             sign_w = w_t / square_root(w_t**2 + self.upwind_velocity_floor**2)
-            h = var("cartesian_element_size_Eulerian")
+            h = evaluate_in_past(var("cartesian_element_size_Eulerian"), apply_on_others=True)
             weight = self.kinematic_upwind * 0.5 * h * sign_w
             self.add_residual(weak(
                 kinematic_residual,
@@ -1097,6 +1108,7 @@ class StokesTipCoalescence(Problem):
                 raise RuntimeError("neck_frame requires the mapped template (tip_map_alpha > 0)")
             if self.neck_frame_moving:
                 self._R_ref = self.define_global_parameter(R_ref=self.R_start)
+                self._U_frame = self.define_global_parameter(U_frame=0.0) if self.kinematic_upwind > 0 else None
             self._R_shift = (
                 Rn / scale_factor("spatial") if self.neck_frame_moving
                 else self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
@@ -1146,7 +1158,8 @@ class StokesTipCoalescence(Problem):
             eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
         eqs += (
-            NeckMovingFreeSurface(Rn, kinematic_upwind=self.kinematic_upwind) if self.neck_frame_moving
+            NeckMovingFreeSurface(Rn, kinematic_upwind=self.kinematic_upwind, frame_speed=self._U_frame)
+            if self.neck_frame_moving
             else NavierStokesFreeSurface(surface_tension=1.0)
         ) @ "interface"
         if self.neck_stretch:
@@ -1900,6 +1913,8 @@ class StokesTipCoalescence(Problem):
                 self._dt = dt
                 self._predict_now = True
                 self._step_state_before_newton = st
+                if getattr(self, "_U_frame", None) is not None:
+                    self._U_frame.value = float(st["u_neck"])
                 try:
                     self.solve(timestep=dt, do_not_set_IC=True,
                                globally_convergent_newton=self.line_search)
