@@ -809,6 +809,7 @@ class StokesTipCoalescence(Problem):
         extra_newton_iterations: int = 0,
         min_newton_iterations: int = 0,
         curvature_step_limit: float = 0.0,
+        line_search: bool = False,
         tip_apex_zone: float = 0.05,
     ):
         super().__init__()
@@ -889,6 +890,7 @@ class StokesTipCoalescence(Problem):
         self._newton_iteration = 0
         self._newton_tolerance_before_gate = None
         self.curvature_step_limit = float(curvature_step_limit)
+        self.line_search = bool(line_search)
         if self.curvature_step_limit < 0:
             raise ValueError("curvature_step_limit must be non-negative")
         self._step_state_before_newton = None
@@ -1663,7 +1665,8 @@ class StokesTipCoalescence(Problem):
                 self._predict_now = True
                 self._step_state_before_newton = st
                 try:
-                    self.solve(timestep=dt, do_not_set_IC=True)
+                    self.solve(timestep=dt, do_not_set_IC=True,
+                               globally_convergent_newton=self.line_search)
                     # The max-residual test is dominated by far-field rows whose weights exceed
                     # the tip rows by ~20 decades at R0=1e-6, so Newton stops with the tip
                     # equations unconverged and a grid-scale wrinkle grows on the tip (run 58).
@@ -1710,6 +1713,15 @@ class StokesTipCoalescence(Problem):
             self._steps += 1
             st_prev = st
             st = self.neck_state()
+            if self.line_search and self.neck_frame_moving:
+                growth = st["R_min"] - st_prev["R_min"]
+                expected = dt * st["u_neck"]
+                ratio = growth / expected if expected > 0 else float("nan")
+                if not math.isfinite(ratio) or not 0.2 <= ratio <= 5.0:
+                    print(f"moving-frame kinematic growth gate failed: dR={growth:.6e}, "
+                          f"u*dt={expected:.6e}, ratio={ratio:.6e}", flush=True)
+                    status = "kinematic_failure"
+                    break
             if self.tip_refine and math.isfinite(st["tip_radius"]) and st["tip_radius"] > 0 and st["h_tip_now"] <= st["tip_radius"] / 4:
                 self.tip_radius_lagged = st["tip_radius"]  # trust the measurement only when resolved
             self._last_curvature_ratio = abs(st["two_H"] - st_prev["two_H"]) / max(abs(st_prev["two_H"]), 1e-30)
@@ -1740,6 +1752,7 @@ class StokesTipCoalescence(Problem):
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,
                 "max_residuals_cap": self.max_residuals_cap,
+                "line_search": self.line_search,
                 "min_newton_iterations": self.min_newton_iterations,
                 "curvature_step_limit": self.curvature_step_limit,
                 "neck_frame": self.neck_frame,

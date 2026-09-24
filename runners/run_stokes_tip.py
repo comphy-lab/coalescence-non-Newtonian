@@ -41,6 +41,7 @@ def main() -> int:
     ap.add_argument("--tip-map-core", type=float, default=1e3, help="core radius of the composite map in tip radii")
     ap.add_argument("--tip-map-linear-core", type=float, default=0.0, help="linear apex core radius in lagged tip radii; 0 preserves the historical map")
     ap.add_argument("--max-residuals", type=float, default=1e10, help="oomph-lib Newton max-residual cap")
+    ap.add_argument("--line-search", action="store_true", help="use pyoomph's globally convergent Newton line search")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
@@ -106,6 +107,7 @@ def main() -> int:
         tip_map_core=args.tip_map_core,
         tip_map_linear_core=args.tip_map_linear_core,
         max_residuals=args.max_residuals,
+        line_search=args.line_search,
         extra_newton_iterations=args.extra_newton,
         min_newton_iterations=args.min_newton,
         curvature_step_limit=args.curvature_step_limit,
