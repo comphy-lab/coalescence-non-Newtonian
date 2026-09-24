@@ -49,6 +49,7 @@ from pyoomph.equations.generic import (
     WeakContribution,
 )
 from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
+from pyoomph.expressions import grad, mesh_velocity, square_root
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
