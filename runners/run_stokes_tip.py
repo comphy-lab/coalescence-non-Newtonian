@@ -42,6 +42,8 @@ def main() -> int:
     ap.add_argument("--tip-map-linear-core", type=float, default=0.0, help="linear apex core radius in lagged tip radii; 0 preserves the historical map")
     ap.add_argument("--max-residuals", type=float, default=1e10, help="oomph-lib Newton max-residual cap")
     ap.add_argument("--line-search", action="store_true", help="use pyoomph's globally convergent Newton line search")
+    ap.add_argument("--audit-blocks", action="store_true", help="stop after one accepted step and audit frozen Stokes and complement Jacobian blocks")
+    ap.add_argument("--audit-dt", type=float, default=None, help="fixed BDF1 timestep for --audit-blocks")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
@@ -113,6 +115,15 @@ def main() -> int:
         curvature_step_limit=args.curvature_step_limit,
     )
     pb.quiet()
+    if args.audit_blocks:
+        if args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6:
+            raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
+        summary = pb.run_campaign(max_steps=1, max_wall_s=args.max_wall_s)
+        if summary["steps"] != 1:
+            return 1
+        from runners.stokes_block_audit import audit_one_step
+        audit_one_step(pb, args.out, args.audit_dt)
+        return 0
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
     return 0 if summary["status"] in ("reached_R_stop", "wall_limit") else 1
 
