@@ -392,21 +392,48 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
 
 
 class NeckMovingFreeSurface(NavierStokesFreeSurface):
-    """Use the physical interface velocity when the mesh stores X = r - R_neck."""
+    """Use the physical interface velocity when the mesh stores X = r - R_neck.
 
-    def __init__(self, neck_radius):
+    ``kinematic_upwind`` > 0 adds a streamline-upwind Petrov-Galerkin weighting to the kinematic
+    condition.  Interface nodes near the neck are held at fixed X, so the liquid surface streams
+    past them towards the neck at c = dR/dt - u_t and the discrete kinematic condition advects the
+    interface height with a grid Peclet number ~2c/(sigma/mu), independent of the element size.
+    The test function psi is augmented by upwind * (h/2) sign(w_t) d(psi)/ds, h the element arc
+    length and w_t the liquid velocity relative to the nodes along the tangent.  The added term
+    vanishes for the exact solution (it multiplies the kinematic residual) and changes no physics.
+    """
+
+    def __init__(self, neck_radius, kinematic_upwind: float = 0.0, upwind_velocity_floor: float = 1e-3):
         super().__init__(surface_tension=1.0)
         self.neck_radius = neck_radius
+        self.kinematic_upwind = float(kinematic_upwind)
+        self.upwind_velocity_floor = float(upwind_velocity_floor)
 
     def define_residuals(self):
         super().define_residuals()
         # The parent contributes (dX/dt-u).n; physical mesh motion also has
         # dR_neck/dt in the radial direction. Keep u in the laboratory frame.
+        Rdot = partial_t(self.neck_radius, ALE=False)
         self.add_residual(weak(
-            partial_t(self.neck_radius, ALE=False) * var("normal_x"),
+            Rdot * var("normal_x"),
             testfunction(self.kinbc_name),
             coordsys=self.kinematic_bc_coordsys,
         ))
+        if self.kinematic_upwind > 0:
+            n = var("normal")
+            t = vector(-n[1], n[0])
+            u = var("velocity")
+            node_velocity = mesh_velocity() + vector(Rdot, 0)
+            kinematic_residual = dot(node_velocity - u, n)
+            w_t = dot(u - node_velocity, t)
+            sign_w = w_t / square_root(w_t**2 + self.upwind_velocity_floor**2)
+            h = var("cartesian_element_size_Eulerian")
+            weight = self.kinematic_upwind * 0.5 * h * sign_w
+            self.add_residual(weak(
+                kinematic_residual,
+                weight * dot(grad(testfunction(self.kinbc_name)), t),
+                coordsys=self.kinematic_bc_coordsys,
+            ))
 
 
 class MovingFrameAxisBC(EnforcedBC):
@@ -894,6 +921,7 @@ class StokesTipCoalescence(Problem):
         interface_grading: float = 0.0,
         interface_size_growth: float = 0.3,
         restart: dict[str, Any] | None = None,
+        kinematic_upwind: float = 0.0,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -984,6 +1012,10 @@ class StokesTipCoalescence(Problem):
         # size grows away from the interface at interface_size_growth per unit mapped distance.
         self.interface_grading = float(interface_grading)
         self.interface_size_growth = float(interface_size_growth)
+        # Streamline-upwind weighting of the moving-frame kinematic condition (0 = Galerkin).
+        self.kinematic_upwind = float(kinematic_upwind)
+        if self.kinematic_upwind < 0 or (self.kinematic_upwind and not neck_frame_moving):
+            raise ValueError("kinematic_upwind must be >= 0 and requires the moving neck frame")
         if self.interface_grading < 0 or self.interface_size_growth <= 0:
             raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
@@ -1113,7 +1145,7 @@ class StokesTipCoalescence(Problem):
             eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
         eqs += (
-            NeckMovingFreeSurface(Rn) if self.neck_frame_moving
+            NeckMovingFreeSurface(Rn, kinematic_upwind=self.kinematic_upwind) if self.neck_frame_moving
             else NavierStokesFreeSurface(surface_tension=1.0)
         ) @ "interface"
         if self.neck_stretch:
