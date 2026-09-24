@@ -8,8 +8,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 from pyoomph import Problem
+from pyoomph.solvers.scipy import SuperLUSerial
+from scipy.sparse import csr_matrix
 
 from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence, validate_upper_interface
+from runners.stokes_block_audit import _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):
@@ -52,6 +55,15 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_block_audit_uses_serial_superlu_without_mpi(self) -> None:
+        import numpy as np
+
+        problem = Problem()
+        matrix = csr_matrix([[4.0, 1.0], [1.0, 3.0]])
+        rhs = np.array([1.0, 2.0])
+        correction = _solve_serial_block(SuperLUSerial(problem), matrix, rhs)
+        np.testing.assert_allclose(matrix @ correction, rhs, atol=1e-14)
+
     def test_moving_frame_equations_can_be_defined(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             problem = StokesTipCoalescence(

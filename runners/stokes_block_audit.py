@@ -22,6 +22,19 @@ def _backward_error(matrix, solution, rhs) -> float:
     return float(np.max(numerator / np.maximum(denominator, np.finfo(float).tiny)))
 
 
+def _solve_serial_block(solver, matrix, rhs) -> np.ndarray:
+    """Use the production SuperLU backend directly for a serial CSR submatrix."""
+    matrix = matrix.tocsr()
+    n = len(rhs)
+    if matrix.shape != (n, n):
+        raise RuntimeError("block matrix is not square")
+    solver._note_external_serial_solve()
+    solution = np.ascontiguousarray(rhs, dtype=np.float64).copy()
+    solver.solve_serial(1, n, matrix.nnz, 1, matrix.data, matrix.indices, matrix.indptr, solution, 0, 1)
+    solver.solve_serial(2, n, matrix.nnz, 1, matrix.data, matrix.indices, matrix.indptr, solution, 0, 1)
+    return solution
+
+
 def _field_indices(problem) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     types, names = problem.get_dof_description()
     resolved = [names[int(kind)].rsplit("/", 1)[-1] if kind >= 0 else "unknown" for kind in types]
@@ -71,12 +84,11 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
                          "history_1_sha256": h1, "history_2_sha256": h2},
         "full_initial_residual_max": float(np.max(np.abs(F0))),
     }
+    output = output_dir / "block-audit.json"
     try:
         A = J0[fluid, :][:, fluid].tocsr()
         rhs = -F0[fluid]
-        df = np.asarray(solver.solve_python_built_distributed(
-            len(fluid), len(fluid), 0, A, rhs
-        ), dtype=np.float64)
+        df = _solve_serial_block(solver, A, rhs)
         if not np.all(np.isfinite(df)):
             raise RuntimeError("non-finite frozen-Stokes correction")
         U1 = U0.copy()
@@ -106,9 +118,7 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
             D = J1[other, :][:, other].tocsr()
             rhs_other = -F1[other]
             try:
-                dg = np.asarray(solver.solve_python_built_distributed(
-                    len(other), len(other), 0, D, rhs_other
-                ), dtype=np.float64)
+                dg = _solve_serial_block(solver, D, rhs_other)
                 if not np.all(np.isfinite(dg)):
                     raise RuntimeError("non-finite complementary correction")
                 U2 = U1.copy()
@@ -126,8 +136,10 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
                 }
             except Exception as exc:
                 result["complement_block"] = {"error": repr(exc)}
+    except Exception as exc:
+        result["audit_error"] = repr(exc)
+        raise
     finally:
         problem.set_current_dofs(U0)
-    output = output_dir / "block-audit.json"
-    output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+        output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     return result
