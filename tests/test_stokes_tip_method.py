@@ -70,10 +70,10 @@ class NewtonGateTests(unittest.TestCase):
             nodes = [Mock(), Mock()]
             axis, bulk = Mock(), Mock()
             axis.nodes.return_value = nodes
-            with patch.object(problem, "_frame_shift_now", return_value=1e-6), patch.object(
-                problem, "get_mesh", side_effect=lambda name: axis if name == "drop/axis" else bulk
+            with patch.object(
+                problem, "_lookup_mesh", side_effect=lambda name: axis if name == "drop/axis" else bulk
             ), patch.object(problem, "invalidate_cached_mesh_data"):
-                problem._snap_moving_axis()
+                problem._snap_moving_axis(radius=1e-6)
             for node in nodes:
                 node.set_x.assert_called_once_with(0, -1.0)
             bulk.set_lagrangian_nodal_coordinates.assert_called_once_with()
