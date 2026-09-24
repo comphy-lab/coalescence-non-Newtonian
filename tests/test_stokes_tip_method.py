@@ -13,7 +13,7 @@ from scipy.sparse import csr_matrix
 
 from problems.newtonian.coalescence_stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
-    StokesTipCoalescence, validate_upper_interface,
+    StokesTipCoalescence, shallow_interface_refinement_points, validate_upper_interface,
 )
 from problems.newtonian.q2_geometry import signed_jacobian_range
 from runners.stokes_block_audit import _json_safe, _solve_serial_block
@@ -199,6 +199,14 @@ class NewtonGateTests(unittest.TestCase):
             validate_upper_interface(poly, 1e-6)
         self.assertEqual(caught.exception.segment, 0)
         self.assertLess(caught.exception.minimum_z, 0.0)
+
+    def test_shallow_off_neck_trough_requests_refinement_without_moving_interface(self) -> None:
+        poly = [(0.0, 1e-3), (0.5, 1.2e-3), (1.0, 1e-2)]
+        targets = shallow_interface_refinement_points(poly, tip_radius=1e-7)
+        self.assertEqual(len(targets), 1)
+        self.assertGreater(targets[0][1], 0.0)
+        self.assertLess(targets[0][2], 0.05)
+        self.assertEqual(shallow_interface_refinement_points(poly, tip_radius=1e-4), [])
 
     def test_invalid_tip_map_and_newton_controls_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as out:
