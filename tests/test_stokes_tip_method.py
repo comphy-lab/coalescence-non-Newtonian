@@ -52,6 +52,15 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_moving_frame_equations_can_be_defined(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(
+                R0=1e-6, Z0=5e-13, output_dir=out,
+                tip_map_alpha=0.5, neck_frame=True, neck_frame_moving=True,
+            )
+            with patch.object(Problem, "add_equations", lambda self, equations: None):
+                problem.define_problem()
+
     def test_extra_newton_is_rejected_and_gate_uses_original_solve_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             with self.assertRaisesRegex(ValueError, "post-step Newton"):
