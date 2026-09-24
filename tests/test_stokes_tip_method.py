@@ -67,6 +67,16 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_fresh_history_translation_cap_is_laboratory_frame_only(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            common = dict(R0=1e-6, Z0=5e-13, output_dir=out,
+                          tip_map_alpha=0.5, neck_frame=True, dt_initial=1e-15)
+            fixed = StokesTipCoalescence(**common)
+            moving = StokesTipCoalescence(**common, neck_frame_moving=True)
+            state = {"h_tip_now": 1e-20, "u_neck": 5.0}
+            self.assertEqual(fixed.limit_dt_after_history_reset(1e-11, state), 1e-15)
+            self.assertEqual(moving.limit_dt_after_history_reset(1e-11, state), 1e-11)
+
     def test_audit_receipt_serialises_nonfinite_diagnostics(self) -> None:
         import json
         import numpy as np
