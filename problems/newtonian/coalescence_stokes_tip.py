@@ -53,6 +53,31 @@ from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquat
 from .geometry import sphere_bridge_junction, sphere_centre
 
 
+def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None:
+    """Reject any Q2 upper-interface segment that crosses the symmetry plane."""
+    if len(poly) < 4:
+        raise RuntimeError("interface polyline is too short")
+    if abs(poly[0][1]) > 100.0 * math.ulp(max(abs(poly[0][1]), r0**3)):
+        raise RuntimeError("interface neck left the symmetry plane")
+    for x, z in poly:
+        if not (math.isfinite(x) and math.isfinite(z)):
+            raise RuntimeError("interface contains a non-finite coordinate")
+        tolerance = 100.0 * math.ulp(max(abs(z), r0**3))
+        if z < -tolerance:
+            raise RuntimeError("upper interface crosses below the symmetry plane")
+    # The bridge-circle junction can have a genuine local z maximum, so
+    # monotonic z is not a valid gate.  Check only hidden negative Q2 dips.
+    for i in range(0, len(poly) - 2, 2):
+        z0, zm, z1 = (poly[j][1] for j in (i, i + 1, i + 2))
+        a = 2.0 * (z0 - 2.0 * zm + z1)
+        b = 4.0 * zm - 3.0 * z0 - z1
+        tolerance = 100.0 * math.ulp(max(abs(z0), abs(zm), abs(z1), r0**3))
+        if a > 0 and 0 < -b / (2.0 * a) < 1:
+            zmin = z0 - b * b / (4.0 * a)
+            if zmin < -tolerance:
+                raise RuntimeError("upper interface quadratic edge crosses below the symmetry plane")
+
+
 def smooth_polyline_arclength(pts: list[tuple[float, float]], half_window: int = 3) -> list[tuple[float, float]]:
     """Local least-squares quadratic smoothing of (r,z)(s) in chord-length parameter.
 
@@ -268,18 +293,22 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
     Derivatives with respect to X equal those with respect to r.
     """
 
-    def __init__(self, shift):
-        super().__init__()
+    def __init__(self, shift, *, moving: bool = False, reference_shift=None):
+        # The error/size estimator is not a physical integral.  In moving mode
+        # it must not expand a global ODE field outside residual code generation.
+        super().__init__(cartesian_error_estimation=moving)
         self.shift = shift
+        self.reference_shift = shift if reference_shift is None else reference_shift
 
-    def _shift(self, with_scales: bool):
-        return self.shift * scale_factor("spatial") if with_scales else self.shift
+    def _shift(self, with_scales: bool, lagrangian: bool = False):
+        shift = self.reference_shift if lagrangian else self.shift
+        return shift * scale_factor("spatial") if with_scales else shift
 
     def integral_dx(self, nodal_dim, edim, with_scale, spatial_scale, lagrangian):
         if edim >= 3:
             raise RuntimeError("Axisymmetry does not work for dimension " + str(edim))
         edim_offs = edim + 1
-        r = (nondim("lagrangian_x") if lagrangian else nondim("coordinate_x")) + self.shift
+        r = (nondim("lagrangian_x") if lagrangian else nondim("coordinate_x")) + self._shift(False, lagrangian)
         dx = nondim("dX") if lagrangian else nondim("dx")
         if with_scale:
             return spatial_scale ** edim_offs * 2 * pi * r * dx
@@ -296,7 +325,7 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
         if arg.nops() != 3:
             raise RuntimeError("Cannot take a 2d axisymmetric vector gradient from a vector with dim!=2:  " + str(arg))
         x, y = self.get_coords(ndim, with_scales, lagrangian)
-        r = x + self._shift(with_scales)
+        r = x + self._shift(with_scales, lagrangian)
         res = [[diff(arg[0], x), diff(arg[0], y), 0],
                [diff(arg[1], x), diff(arg[1], y), 0], [0, 0, arg[0] / r]]
         return matrix(res)
@@ -305,8 +334,33 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
         if ndim != 2:
             raise RuntimeError("NeckFrameAxisymmetric supports two-dimensional (r,z) meshes only")
         coords = self.get_coords(ndim, with_scales, lagrangian)
-        r = coords[0] + self._shift(with_scales)
+        r = coords[0] + self._shift(with_scales, lagrangian)
         return diff(arg[0], coords[0]) + diff(arg[1], coords[1]) + arg[0] / r
+
+
+class NeckMovingFreeSurface(NavierStokesFreeSurface):
+    """Use the physical interface velocity when the mesh stores X = r - R_neck."""
+
+    def __init__(self, neck_radius):
+        super().__init__(surface_tension=1.0)
+        self.neck_radius = neck_radius
+
+    def define_residuals(self):
+        super().define_residuals()
+        # The parent contributes (dX/dt-u).n; physical mesh motion also has
+        # dR_neck/dt in the radial direction. Keep u in the laboratory frame.
+        self.add_residual(weak(
+            partial_t(self.neck_radius, ALE=False) * var("normal_x"),
+            testfunction(self.kinbc_name),
+            coordsys=self.kinematic_bc_coordsys,
+        ))
+
+
+class MovingFrameAxisBC(EnforcedBC):
+    """Give the moving-axis constraint a multiplier distinct from the plane's."""
+
+    def get_lagrange_multiplier_name(self, varname: str) -> str:
+        return "_lagr_moving_axis_" + varname
 
 
 class MappedTipMesh(GmshTemplate):
@@ -551,6 +605,7 @@ class MappedTipMesh(GmshTemplate):
             kind = "initial"
         else:
             poly = pb.interface_polyline()          # frame coordinate X
+            validate_upper_interface(poly, pb.R0)
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
             poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
@@ -631,6 +686,8 @@ class MappedTipMesh(GmshTemplate):
         t_geo = time.time()
         iface_p = self._control_points(pieces, S, lambda p: max(f_ctrl * size_mapped(p), h_floor_p),
                                        shrink_start=False)
+        if any(y < -100.0 * math.ulp(max(abs(y), h_tip_p)) for _, y in iface_p):
+            raise RuntimeError("mapped upper-interface control point crosses below the symmetry plane")
         # Axis r = 0 (X = -shift) from the pole to the origin: straight, curved in the map.
         axis_pieces = []
         z = z_pole
@@ -742,6 +799,7 @@ class StokesTipCoalescence(Problem):
         tip_roundoff_factor: float = 100.0,
         tip_rel_floor: float = 0.0,
         neck_frame: bool = False,
+        neck_frame_moving: bool = False,
         gmsh_random_factor: float = 1e-9,
         tip_map_outer: float = 0.0,
         tip_map_core: float = 1e3,
@@ -808,6 +866,9 @@ class StokesTipCoalescence(Problem):
         self.tip_rel_floor = float(tip_rel_floor)
         # Neck-anchored radial frame X = r - R_shift (NeckFrameAxisymmetric); requires tip_map.
         self.neck_frame = bool(neck_frame)
+        self.neck_frame_moving = bool(neck_frame_moving)
+        if self.neck_frame_moving and not (self.neck_frame and neck_stretch):
+            raise ValueError("moving neck frame requires neck_frame and neck_stretch")
         self.gmsh_random_factor = float(gmsh_random_factor)
         # Composite map: outer exponent (0 = same as tip_map_alpha) beyond tip_map_core tip radii.
         self.tip_map_outer = float(tip_map_outer)
@@ -890,11 +951,20 @@ class StokesTipCoalescence(Problem):
         return rr > 0.0 and (not math.isfinite(rho) or rho < margin * rr)
 
     def define_problem(self):
+        Rn = var("R_neck", domain="globals") if self.neck_stretch else None
         if self.neck_frame:
             if not self.tip_map_alpha > 0:
                 raise RuntimeError("neck_frame requires the mapped template (tip_map_alpha > 0)")
-            self._R_shift = self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
-            self.set_coordinate_system(NeckFrameAxisymmetric(self._R_shift))
+            if self.neck_frame_moving:
+                self._R_ref = self.define_global_parameter(R_ref=self.R0)
+            self._R_shift = (
+                Rn / scale_factor("spatial") if self.neck_frame_moving
+                else self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
+            )
+            reference_shift = self._R_ref / scale_factor("spatial") if self.neck_frame_moving else None
+            self.set_coordinate_system(NeckFrameAxisymmetric(
+                self._R_shift, moving=self.neck_frame_moving, reference_shift=reference_shift
+            ))
         else:
             self.set_coordinate_system("axisymmetric")
         if self.S != 1.0:
@@ -925,11 +995,20 @@ class StokesTipCoalescence(Problem):
         shift_phys = self._R_shift * scale_factor("spatial") if self.neck_frame else 0
         if self.neck_frame:
             # The axis r = 0 sits at X = -R_shift; AxisymmetryBC would pin X = 0.
-            eqs += DirichletBC(velocity_x=0, mesh_x=-shift_phys) @ "axis"
+            if self.neck_frame_moving:
+                eqs += DirichletBC(velocity_x=0) @ "axis"
+                # The axisymmetric boundary measure vanishes at r=0, so its
+                # coordinate constraint needs the meridional line measure.
+                eqs += MovingFrameAxisBC(mesh_x=var("mesh_x") + Rn, coordsys=cartesian) @ "axis"
+            else:
+                eqs += DirichletBC(velocity_x=0, mesh_x=-shift_phys) @ "axis"
         else:
             eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
-        eqs += NavierStokesFreeSurface(surface_tension=1.0) @ "interface"
+        eqs += (
+            NeckMovingFreeSurface(Rn) if self.neck_frame_moving
+            else NavierStokesFreeSurface(surface_tension=1.0)
+        ) @ "interface"
         if self.neck_stretch:
             # Make the mesh translate with the neck.  A global unknown R_neck equals the
             # neck node's radial position (point constraint at the interface/plane corner,
@@ -938,24 +1017,42 @@ class StokesTipCoalescence(Problem):
             # X is the Lagrangian coordinate and R_ref the neck radius at the last remesh.
             # The stretch multiplier is pinned at the corner itself, where the condition
             # would duplicate the point constraint.
-            self._R_ref = self.define_global_parameter(R_ref=self.R0)
+            if self._R_ref is None:
+                self._R_ref = self.define_global_parameter(R_ref=self.R0)
             self.add_equations(
                 (GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)) @ "globals"
             )
-            Rn = var("R_neck", domain="globals")
-            eqs += EnforcedBC(mesh_x=var("mesh_x") + shift_phys - (var("lagrangian_x") + shift_phys) * Rn / self._R_ref) @ "plane"
+            if self.neck_frame_moving:
+                eqs += EnforcedBC(mesh_x=var("mesh_x") - var("lagrangian_x") * Rn / self._R_ref) @ "plane"
+            else:
+                eqs += EnforcedBC(mesh_x=var("mesh_x") + shift_phys - (var("lagrangian_x") + shift_phys) * Rn / self._R_ref) @ "plane"
             eqs += DirichletBC(_lagr_enf_bc_mesh_x=0) @ "plane/interface"
             if self.neck_frame:
                 eqs += DirichletBC(_lagr_enf_bc_mesh_x=0) @ "plane/axis"
-            eqs += WeakContribution(var("mesh_x") + shift_phys - Rn, testfunction("R_neck", domain="globals")) @ "interface/plane"
+            if self.neck_frame_moving:
+                eqs += DirichletBC(mesh_x=0) @ "interface/plane"
+                eqs += WeakContribution(
+                    partial_t(Rn, ALE=False) - var("velocity_x"),
+                    testfunction("R_neck", domain="globals"),
+                    coordsys=cartesian,
+                ) @ "interface/plane"
+            else:
+                eqs += WeakContribution(var("mesh_x") + shift_phys - Rn, testfunction("R_neck", domain="globals")) @ "interface/plane"
             # Tangential motion of the interface: a radial translation by (R_neck - R_ref)
             # decaying with Lagrangian distance from the neck over L = tip_translation_span*R_ref,
             # imposed through a tangential Lagrange multiplier.  The normal motion stays with
             # the kinematic condition.  Pinned at both corners where the tangent is already fixed.
         if self.neck_stretch and self.interface_translation:
             X = var("lagrangian")
-            s2 = (X[0] + shift_phys - self._R_ref) ** 2 + X[1] ** 2
-            shift = (Rn - self._R_ref) * exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
+            if self.neck_frame_moving:
+                s2 = X[0] ** 2 + X[1] ** 2
+                decay = exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
+                # In physical coordinates the old gauge moves by ΔR*decay.
+                # Subtract the frame's uniform ΔR to obtain its X-displacement.
+                shift = (Rn - self._R_ref) * (decay - 1)
+            else:
+                s2 = (X[0] + shift_phys - self._R_ref) ** 2 + X[1] ** 2
+                shift = (Rn - self._R_ref) * exp(-s2 / (self.tip_translation_span * self._R_ref) ** 2)
             tvec = vector(-var("normal_y"), var("normal_x"))
             target = var("mesh") - X - vector(shift, 0)
             iface = ScalarField("lam_t", space="C2")
@@ -981,6 +1078,11 @@ class StokesTipCoalescence(Problem):
         u = data.get_data("velocity_x")
         v = data.get_data("velocity_y")
         return data, r, z, u, v
+
+    def _frame_shift_now(self) -> float:
+        if self.neck_frame_moving:
+            return float(self.get_ode("globals").get_value("R_neck", as_float=True))
+        return self.frame_shift_phys
 
     def interface_polyline(self) -> list[tuple[float, float]]:
         from pyoomph.meshes.ordering import sort_line_segments
@@ -1094,7 +1196,7 @@ class StokesTipCoalescence(Problem):
         on_plane = [i for i in range(n) if abs(z[i]) <= 1e-30]
         i0 = max(on_plane, key=lambda i: r[i]) if on_plane else int(z.argmin())
         p0 = (float(r[i0]), float(z[i0]))
-        rmin = p0[0] + self.frame_shift_phys      # physical neck radius
+        rmin = p0[0] + self._frame_shift_now()      # physical neck radius
         # Least-squares circle over the interface nodes within ~1 lagged tip radius of the
         # neck (at least the five nearest).  Far more robust than a three-node circle when the
         # element size at the tip varies between remeshes.
@@ -1147,7 +1249,7 @@ class StokesTipCoalescence(Problem):
         }
 
     def bridge_half_height(self, rmin: float, poly: list[tuple[float, float]]) -> float:
-        target = 1.05 * rmin - self.frame_shift_phys      # poly is in the frame coordinate
+        target = 1.05 * rmin - self._frame_shift_now()      # poly is in the frame coordinate
         for (r1, z1), (r2, z2) in zip(poly[:-1], poly[1:]):
             if (r1 - target) * (r2 - target) <= 0.0 and r1 != r2:
                 w = (target - r1) / (r2 - r1)
@@ -1200,7 +1302,7 @@ class StokesTipCoalescence(Problem):
             fh.write(f"# t={state['t']} R_min={state['R_min']} two_H={state['two_H']}\n")
             fh.write("r z\n")
             for r, z in poly:
-                fh.write(f"{r + self.frame_shift_phys:.16e} {z:.16e}\n")
+                fh.write(f"{r + self._frame_shift_now():.16e} {z:.16e}\n")
 
     # ---------------------------------------------------------- h-refinement
     def refine_tip(self) -> int:
@@ -1288,12 +1390,36 @@ class StokesTipCoalescence(Problem):
         so it survives selective bisection."""
         t = float(self.get_current_time(dimensional=False, as_float=True))
         dofs, _pos, pinned = self._get_all_values_at_current_time(True)
-        return t, numpy.array(dofs, copy=True), numpy.array(pinned, copy=True)
+        remesh_state = {
+            "tip_radius_lagged": self.tip_radius_lagged,
+            "rho_at_remesh": self.rho_at_remesh,
+            "rmin_at_remesh": self.rmin_at_remesh,
+            "last_rmin": self.last_rmin,
+            "frame_shift_phys": self.frame_shift_phys,
+            "R_ref": self._R_ref.value if self._R_ref is not None else None,
+            "pre_remesh_state": getattr(self, "_pre_remesh_state", None),
+            "pre_remesh_poly": getattr(self, "_pre_remesh_poly", None),
+            "pending_remesh_reason": self._pending_remesh_reason,
+            "mesh_receipt": self._mesh_receipt,
+            "n_remesh": self.n_remesh,
+            "mesh_id": id(self.get_mesh("drop")),
+        }
+        return t, numpy.array(dofs, copy=True), numpy.array(pinned, copy=True), remesh_state
 
     def _dof_restore(self, snap) -> None:
-        t, dofs, pinned = snap
+        t, dofs, pinned, remesh_state = snap
+        if self.n_remesh != remesh_state["n_remesh"] or id(self.get_mesh("drop")) != remesh_state["mesh_id"]:
+            raise RuntimeError("cannot restore pre-remesh DOFs after the mesh changed")
         self.set_all_values_at_current_time(dofs, pinned, True)
         self.set_current_time(t, dimensional=False)
+        for name in ("tip_radius_lagged", "rho_at_remesh", "rmin_at_remesh", "last_rmin", "frame_shift_phys"):
+            setattr(self, name, remesh_state[name])
+        if self._R_ref is not None:
+            self._R_ref.value = remesh_state["R_ref"]
+        self._pre_remesh_state = remesh_state["pre_remesh_state"]
+        self._pre_remesh_poly = remesh_state["pre_remesh_poly"]
+        self._pending_remesh_reason = remesh_state["pending_remesh_reason"]
+        self._mesh_receipt = remesh_state["mesh_receipt"]
         # A failed unsteady solve has shifted the history; restart impulsively (BDF1 step).
         self.assign_initial_values_impulsive()
         self.timestepper.set_num_unsteady_steps_done(0)
@@ -1339,6 +1465,10 @@ class StokesTipCoalescence(Problem):
     # -------------------------------------------------------------- remeshing
     def actions_after_newton_solve(self):
         if not self.last_newton_step_failed() and self._template is not None:
+            # A raw-residual pass is insufficient to admit the geometry.  An
+            # invalid tip otherwise reaches Gmsh's edge recovery, which can
+            # loop on a self-intersecting upper-interface spline.
+            validate_upper_interface(self.interface_polyline(), self.R0)
             if self.curvature_step_limit > 0 and self._step_state_before_newton is not None:
                 previous = self._step_state_before_newton["two_H"]
                 current_state = self.neck_state()
@@ -1392,7 +1522,11 @@ class StokesTipCoalescence(Problem):
             self._R_ref.value = st["R_min"]
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
-        if self.neck_frame:
+        if self.neck_frame_moving:
+            # X_neck is pinned at zero throughout the timestep; no coordinate
+            # translation or global-parameter update is needed at remeshing.
+            self.frame_shift_phys = st["R_min"]
+        elif self.neck_frame:
             # Move the frame origin to the neck: translate every node by -dX and advance the
             # parameter, a physically identical state, before the new mesh is generated and
             # the old one interpolated in the same frame.
@@ -1497,6 +1631,7 @@ class StokesTipCoalescence(Problem):
                 dt = min(dt, 20.0 * st["h_tip_now"] / max(abs(st["u_neck"]), 1e-3))
                 dt = max(dt, self.dt_initial)
                 self._regrow = True
+            remesh_before_step = self.n_remesh
             for _attempt in range(6):
                 snapshot = self._dof_snapshot()
                 self._dt = dt
@@ -1529,10 +1664,7 @@ class StokesTipCoalescence(Problem):
                     try:
                         self._dof_restore(snapshot)
                     except Exception as exc3:
-                        # A quality remesh inside the failed step replaced the mesh; the snapshot
-                        # no longer fits.  Continue from the remeshed state with a smaller step.
-                        print(f"snapshot restore skipped after mid-step remesh: {exc3!r}", flush=True)
-                        self._dt_prev = None
+                        raise RuntimeError("failed step cannot be rolled back safely") from exc3
                     dt *= 0.3
                 finally:
                     self._predict_now = False
@@ -1542,7 +1674,7 @@ class StokesTipCoalescence(Problem):
             if not ok:
                 status = "newton_failure"
                 break
-            self._dt_prev = dt
+            self._dt_prev = None if self.n_remesh != remesh_before_step else dt
             self._dt = dt
             self._steps += 1
             st_prev = st
@@ -1578,6 +1710,8 @@ class StokesTipCoalescence(Problem):
                 "newton_tolerance": self.newton_tolerance,
                 "min_newton_iterations": self.min_newton_iterations,
                 "curvature_step_limit": self.curvature_step_limit,
+                "neck_frame": self.neck_frame,
+                "neck_frame_moving": self.neck_frame_moving,
                 "tip_map_linear_core": self.tip_map_linear_core,
                 "R_stop": self.R_stop,
             },

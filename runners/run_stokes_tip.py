@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
     ap.add_argument("--neck-frame", action="store_true", help="radial mesh coordinate measured from the neck (NeckFrameAxisymmetric); requires --tip-map")
+    ap.add_argument("--neck-frame-moving", action="store_true", help="solve the neck origin within each timestep; requires --neck-frame")
     ap.add_argument("--tip-rel-floor", type=float, default=0.0, help="smallest tip element relative to R_neck on the mapped mesh (double-precision solve floor); 0 = off")
     args = ap.parse_args()
 
@@ -100,6 +101,7 @@ def main() -> int:
         tip_map_alpha=args.tip_map,
         tip_rel_floor=args.tip_rel_floor,
         neck_frame=args.neck_frame,
+        neck_frame_moving=args.neck_frame_moving,
         tip_map_outer=args.tip_map_outer,
         tip_map_core=args.tip_map_core,
         tip_map_linear_core=args.tip_map_linear_core,

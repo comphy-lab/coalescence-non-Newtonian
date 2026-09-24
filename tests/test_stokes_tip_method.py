@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from pyoomph import Problem
 
-from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence
+from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence, validate_upper_interface
 
 
 class TipMapTests(unittest.TestCase):
@@ -79,12 +79,27 @@ class NewtonGateTests(unittest.TestCase):
             problem._template = object()
             problem._step_state_before_newton = {"two_H": -1.0e16, "tip_radius": 1e-16}
             with patch.object(problem, "last_newton_step_failed", return_value=False), patch.object(
+                problem, "interface_polyline", return_value=[(1e-6, 0), (1.1e-6, 1e-10), (1.2e-6, 2e-10), (1.3e-6, 3e-10)]
+            ), patch.object(
                 problem, "neck_state", return_value={"two_H": -1.3e16, "tip_radius": 1e-16}
             ), patch.object(problem, "tip_unresolved", return_value=False), patch.object(
                 problem, "_remesh_reason", side_effect=AssertionError("remesh ran")
             ):
                 with self.assertRaisesRegex(RuntimeError, "tip curvature changed"):
                     problem.actions_after_newton_solve()
+
+    def test_archived_folded_interface_is_rejected_before_remeshing(self) -> None:
+        poly = [(1.0247792e-6, 0.0), (1.02500895e-6, -1.3285e-10),
+                (1.0253e-6, 2e-10), (1.026e-6, 4e-10)]
+        with self.assertRaisesRegex(RuntimeError, "crosses below"):
+            validate_upper_interface(poly, 1e-6)
+
+    def test_positive_q2_nodes_can_still_hide_a_plane_crossing(self) -> None:
+        poly = [(1e-6, 0.0), (1e-6, 1e-21), (1e-6, 3e-20),
+                (1e-6, 4e-20), (1e-6, 5e-20)]
+        # The first edge rises at its nodes but dips below the plane in between.
+        with self.assertRaisesRegex(RuntimeError, "quadratic edge crosses"):
+            validate_upper_interface(poly, 1e-6)
 
     def test_invalid_tip_map_and_newton_controls_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as out:
