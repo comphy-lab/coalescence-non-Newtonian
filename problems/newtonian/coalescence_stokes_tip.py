@@ -100,6 +100,36 @@ def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None
                 raise HiddenInterfacePlaneCrossing(i // 2, zmin)
 
 
+def shallow_interface_refinement_points(
+    poly: list[tuple[float, float]], tip_radius: float
+) -> list[tuple[float, float, float]]:
+    """Locate resolved off-neck Q2 troughs vulnerable to mapped remeshing."""
+    if not math.isfinite(tip_radius) or tip_radius <= 0:
+        return []
+    targets = []
+    for i in range(0, len(poly) - 2, 2):
+        p0, pm, p1 = poly[i : i + 3]
+        z0, zm, z1 = p0[1], pm[1], p1[1]
+        if min(z0, z1) <= 100.0 * tip_radius:
+            continue
+        a = 2.0 * (z0 - 2.0 * zm + z1)
+        b = 4.0 * zm - 3.0 * z0 - z1
+        if a <= 0:
+            continue
+        t = -b / (2.0 * a)
+        if not 0.0 < t < 1.0:
+            continue
+        zmin = z0 - b * b / (4.0 * a)
+        ratio = zmin / max(z0, z1)
+        if not 0.0 < ratio < 0.05:
+            continue
+        x = ((1.0 - t) * (1.0 - 2.0 * t) * p0[0]
+             + 4.0 * t * (1.0 - t) * pm[0]
+             + t * (2.0 * t - 1.0) * p1[0])
+        targets.append((x, zmin, ratio))
+    return sorted(targets, key=lambda point: point[2])[:4]
+
+
 def smooth_polyline_arclength(pts: list[tuple[float, float]], half_window: int = 3) -> list[tuple[float, float]]:
     """Local least-squares quadratic smoothing of (r,z)(s) in chord-length parameter.
 
@@ -598,6 +628,7 @@ class MappedTipMesh(GmshTemplate):
 
         shift = pb.frame_shift_phys                 # X = r - shift (0 in the laboratory frame)
         if self.is_first_time():
+            shallow_targets = []
             r_neck = (pb.R0 - shift) / S
             r0, z0 = pb.R0, pb.Z0
             _, zc = sphere_centre(r0, z0)
@@ -628,6 +659,7 @@ class MappedTipMesh(GmshTemplate):
         else:
             poly = pb.interface_polyline()          # frame coordinate X
             validate_upper_interface(poly, pb.R0)
+            shallow_targets = shallow_interface_refinement_points(poly, pb.tip_radius_lagged)
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
             poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
@@ -759,10 +791,17 @@ class MappedTipMesh(GmshTemplate):
         cap_expr = f"{h_max!r}*({dclamp}/{L!r})^({expo!r})"
         if b != a:
             cap_expr = f"min({cap_expr}, {h_max * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
-        field = self.add_mesh_size_field(
-            "MathEval",
-            F=f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))",
-        )
+        size_expr = f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))"
+        refinement_receipt = []
+        for x, z, clearance_ratio in shallow_targets:
+            centre = self._fwd(x / S, z / S)
+            base_size = size_mapped(centre)
+            local_cap = 0.5 * base_size
+            distance = f"sqrt((x-{centre[0]!r})^2+(y-{centre[1]!r})^2)"
+            size_expr = f"min({size_expr}, {local_cap!r}*(1+{distance}/{base_size!r}))"
+            refinement_receipt.append({"centre_mapped": centre, "size_cap_mapped": local_cap,
+                                       "clearance_ratio": clearance_ratio})
+        field = self.add_mesh_size_field("MathEval", F=size_expr)
         self.set_mesh_size_background_field(field)
         print(f"MESH GEOMETRY: {kind}, {len(iface_p)} interface + {len(axis_p)} axis control points, "
               f"h_tip_mapped={h_tip_p:.3e}, bbox_mapped~{self._g(2.0 * L):.3e}, h_floor={h_floor_phys:.3e}, shift={pb.frame_shift_phys:.6e}, "
@@ -777,6 +816,7 @@ class MappedTipMesh(GmshTemplate):
             "n_interface_points": len(iface_p),
             "n_axis_points": len(axis_p),
             "apex_arc": dict(getattr(pb, "_apex_arc", {})),
+            "shallow_interface_refinement": refinement_receipt,
         }
 
 class StokesTipCoalescence(Problem):
