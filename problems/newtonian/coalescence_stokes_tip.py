@@ -63,6 +63,18 @@ class InvalidMovingFrameGeometry(RuntimeError):
         self.kind = kind
 
 
+class HiddenInterfacePlaneCrossing(RuntimeError):
+    """A quadratic interface edge dips below the plane between valid nodes."""
+
+    def __init__(self, segment: int, minimum_z: float):
+        self.segment = segment
+        self.minimum_z = minimum_z
+        super().__init__(
+            f"upper interface quadratic edge crosses below the symmetry plane "
+            f"at segment {segment}, minimum z={minimum_z:.6e}"
+        )
+
+
 def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None:
     """Reject any Q2 upper-interface segment that crosses the symmetry plane."""
     if len(poly) < 4:
@@ -85,7 +97,7 @@ def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None
         if a > 0 and 0 < -b / (2.0 * a) < 1:
             zmin = z0 - b * b / (4.0 * a)
             if zmin < -tolerance:
-                raise RuntimeError("upper interface quadratic edge crosses below the symmetry plane")
+                raise HiddenInterfacePlaneCrossing(i // 2, zmin)
 
 
 def smooth_polyline_arclength(pts: list[tuple[float, float]], half_window: int = 3) -> list[tuple[float, float]]:
@@ -1753,8 +1765,11 @@ class StokesTipCoalescence(Problem):
                     except Exception as diag_exc:
                         print(f"residual diagnosis unavailable: {diag_exc!r}", flush=True)
                     self._predict_now = False
-                    if (isinstance(exc, InvalidMovingFrameGeometry)
-                            and exc.kind == "bulk_quadrant"
+                    recoverable_geometry = (
+                        (isinstance(exc, InvalidMovingFrameGeometry) and exc.kind == "bulk_quadrant")
+                        or isinstance(exc, HiddenInterfacePlaneCrossing)
+                    )
+                    if (recoverable_geometry
                             and self.neck_frame_moving and not quality_remesh_used
                             and self._template is not None):
                         try:
@@ -1763,12 +1778,17 @@ class StokesTipCoalescence(Problem):
                             valid_poly = self.interface_polyline()
                             validate_upper_interface(valid_poly, self.R0)
                             valid_state = self.neck_state()
-                            self._pending_remesh_reason = "valid-state recovery after rejected bulk-quadrant trial"
+                            self._pending_remesh_reason = (
+                                "valid-state recovery after rejected hidden-Q2 interface trial"
+                                if isinstance(exc, HiddenInterfacePlaneCrossing)
+                                else "valid-state recovery after rejected bulk-quadrant trial"
+                            )
                             old_generation = self.n_remesh
                             if not self.force_remesh({self._template}) or self.n_remesh != old_generation + 1:
                                 raise RuntimeError("valid-state quality remesh did not replace the mesh")
                             recovered_state = self.neck_state()
                             self.validate_domain_geometry()
+                            validate_upper_interface(self.interface_polyline(), self.R0)
                             self.verify_recovery_remesh(valid_state, recovered_state)
                             if abs(self.interface_polyline()[-1][1] - valid_poly[-1][1]) > 1e-5:
                                 raise RuntimeError("valid-state recovery remesh moved the pole excessively")
