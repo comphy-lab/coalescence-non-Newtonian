@@ -55,6 +55,7 @@ def main() -> int:
     ap.add_argument("--interface-size-growth", type=float, default=0.3, help="growth of the element size with mapped distance from the interface")
     ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target relative change of the neck curvature per step")
     ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
+    ap.add_argument("--restart-from", type=Path, default=None, help="restart/remesh_NNNN.npz written by an earlier moving-frame run")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -78,6 +79,14 @@ def main() -> int:
         "pyoomph_module": pyoomph.__file__,
         "argv": sys.argv,
     }
+    restart = None
+    if args.restart_from is not None:
+        import numpy as np
+        with np.load(args.restart_from) as data:
+            restart = {k: (data[k].tolist() if data[k].ndim else data[k].item()) for k in data.files}
+        manifest["restart_from"] = {"path": str(args.restart_from),
+                                    "sha256": hashlib.sha256(args.restart_from.read_bytes()).hexdigest(),
+                                    "t": restart["t"], "R_min": restart["R_min"]}
     (args.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
     with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
@@ -122,6 +131,7 @@ def main() -> int:
         curvature_change_target=args.curvature_change_target,
         tip_shrink_remesh=args.tip_shrink_remesh,
         interface_size_growth=args.interface_size_growth,
+        restart=restart,
     )
     pb.quiet()
     if args.seed_frozen_stokes:

@@ -628,7 +628,7 @@ class MappedTipMesh(GmshTemplate):
         h_tip_phys = pb.current_h_tip()
 
         shift = pb.frame_shift_phys                 # X = r - shift (0 in the laboratory frame)
-        if self.is_first_time():
+        if self.is_first_time() and pb.restart_poly is None:
             shallow_targets = []
             r_neck = (pb.R0 - shift) / S
             r0, z0 = pb.R0, pb.Z0
@@ -658,7 +658,10 @@ class MappedTipMesh(GmshTemplate):
                 pieces = [(lambda t, ev=ev: (ev(t)[0] - shift, ev(t)[1])) for ev in pieces]
             kind = "initial"
         else:
-            poly = pb.interface_polyline()          # frame coordinate X
+            # A restart builds its first mesh exactly as the remesh that followed the saved
+            # (pre-remesh) interface did in the original run.
+            restarting = self.is_first_time()
+            poly = [tuple(p) for p in pb.restart_poly] if restarting else pb.interface_polyline()
             validate_upper_interface(poly, pb.R0)
             shallow_targets = shallow_interface_refinement_points(poly, pb.tip_radius_lagged)
             r_neck = poly[0][0] / S
@@ -687,7 +690,7 @@ class MappedTipMesh(GmshTemplate):
                     pieces = self._q2_pieces(poly)
             else:
                 pieces = self._q2_pieces(poly)
-            kind = "remesh"
+            kind = "restart" if restarting else "remesh"
         T = r_neck                                  # tip in frame coordinates (solver units)
         r_neck_phys = r_neck * S + shift
 
@@ -890,6 +893,7 @@ class StokesTipCoalescence(Problem):
         tip_apex_zone: float = 0.05,
         interface_grading: float = 0.0,
         interface_size_growth: float = 0.3,
+        restart: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -982,7 +986,18 @@ class StokesTipCoalescence(Problem):
         self.interface_size_growth = float(interface_size_growth)
         if self.interface_grading < 0 or self.interface_size_growth <= 0:
             raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
-        self.frame_shift_phys = float(R0) if neck_frame else 0.0
+        # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
+        # coordinates just before that remesh, and the driver scalars at that moment.  In the
+        # Stokes limit the interface is the complete physical state.
+        self.restart_poly = None
+        self._restart = dict(restart) if restart else None
+        if self._restart is not None:
+            if not (neck_frame and neck_frame_moving):
+                raise ValueError("restart is implemented for the moving neck frame only")
+            self.restart_poly = [(float(x), float(z)) for x, z in self._restart["poly"]]
+        R_start = float(self._restart["R_min"]) if self._restart else float(R0)
+        self.R_start = R_start
+        self.frame_shift_phys = R_start if neck_frame else 0.0
         self._R_shift = None
         self._apex_arc = {}
         self._needs_tip_refine = False
@@ -995,12 +1010,13 @@ class StokesTipCoalescence(Problem):
         (self.output_root / "profiles").mkdir(exist_ok=True)
 
         # Lagged mesh parameters (set at each remesh).
-        self.tip_radius_lagged = self.Z0
-        self.rho_at_remesh = self.Z0
-        self.rmin_at_remesh = self.R0
-        self.last_rmin = self.R0
-        self.n_remesh = 0
-        self._step_at_remesh = 0
+        self.tip_radius_lagged = float(self._restart["tip_radius_lagged"]) if self._restart else self.Z0
+        self.rho_at_remesh = float(self._restart["rho_at_remesh"]) if self._restart else self.Z0
+        self.rmin_at_remesh = R_start
+        self.last_rmin = R_start
+        # The restart's first mesh is the remesh that followed the saved state.
+        self.n_remesh = int(self._restart["n_remesh"]) + 1 if self._restart else 0
+        self._step_at_remesh = int(self._restart["steps"]) if self._restart else 0
         self._mesh_receipt: dict[str, Any] = {}
         self._pending_remesh_reason: str | None = None
         self._template: TipGradedQuadrantMesh | MappedTipMesh | None = None
@@ -1008,11 +1024,11 @@ class StokesTipCoalescence(Problem):
         self._progress_path = self.output_root / "progress.jsonl"
         self._wrote_header = False
         self._last_profile_bin: int | None = None
-        self._steps = 0
+        self._steps = int(self._restart["steps"]) if self._restart else 0
         self._dt = self.dt_initial
         self._dt_prev: float | None = None
         self._quality_recovery_streak = 0
-        self._quality_recovery_start = self.R0
+        self._quality_recovery_start = R_start
         self.n_quality_recovery_events = 0
         self._predict_now = False
         self._wall0 = time.time()
@@ -1047,7 +1063,7 @@ class StokesTipCoalescence(Problem):
             if not self.tip_map_alpha > 0:
                 raise RuntimeError("neck_frame requires the mapped template (tip_map_alpha > 0)")
             if self.neck_frame_moving:
-                self._R_ref = self.define_global_parameter(R_ref=self.R0)
+                self._R_ref = self.define_global_parameter(R_ref=self.R_start)
             self._R_shift = (
                 Rn / scale_factor("spatial") if self.neck_frame_moving
                 else self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
@@ -1109,8 +1125,8 @@ class StokesTipCoalescence(Problem):
             # The stretch multiplier is pinned at the corner itself, where the condition
             # would duplicate the point constraint.
             if self._R_ref is None:
-                self._R_ref = self.define_global_parameter(R_ref=self.R0)
-            globals_eqs = GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)
+                self._R_ref = self.define_global_parameter(R_ref=self.R_start)
+            globals_eqs = GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R_start)
             if self.neck_frame_moving:
                 # The neck unknown is a coordinate-scale displacement; leaving
                 # it unscaled makes its global Newton column six decades larger
@@ -1228,7 +1244,9 @@ class StokesTipCoalescence(Problem):
         if self.neck_frame_moving:
             # The ODE initial value is now assigned.  Gmsh inverse-mapping can
             # leave axis nodes off r=0 by O(1e-11) at this case's scale.
-            self._snap_moving_axis(radius=self.R0)
+            self._snap_moving_axis(radius=self.R_start)
+            if self._restart is not None:
+                self.set_current_time(float(self._restart["t"]), dimensional=False, as_float=True)
             self.assign_initial_values_impulsive()
 
     def interface_polyline(self) -> list[tuple[float, float]]:
@@ -1440,6 +1458,21 @@ class StokesTipCoalescence(Problem):
         if self._last_profile_bin != rb:
             self._last_profile_bin = rb
             self.write_profile(poly, state)
+
+    def write_restart_state(self, state: dict[str, float]) -> None:
+        """Save the pre-remesh interface (frame X, z) and the driver scalars the remesh uses."""
+        if not self.neck_frame_moving:
+            return
+        folder = self.output_root / "restart"
+        folder.mkdir(exist_ok=True)
+        numpy.savez(
+            folder / f"remesh_{self.n_remesh + 1:04d}.npz",
+            poly=numpy.asarray(self._pre_remesh_poly, dtype=float),
+            t=float(state["t"]), R_min=float(state["R_min"]), u_neck=float(state["u_neck"]),
+            tip_radius_lagged=float(self.tip_radius_lagged), rho_at_remesh=float(self.rho_at_remesh),
+            n_remesh=int(self.n_remesh), steps=int(self._steps), dt=float(self._dt),
+            frame_shift_phys=float(self.frame_shift_phys),
+        )
 
     def dump_interface_velocity(self, path: Path, state: dict[str, float]) -> None:
         """Diagnostic: interface nodes in arclength order with frame X, z and lab velocity."""
@@ -1690,6 +1723,7 @@ class StokesTipCoalescence(Problem):
             self._R_ref.value = st["R_min"]
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
+        self.write_restart_state(st)
         vel_dump = os.environ.get("LA0_VEL_DUMP")
         if vel_dump:
             self.dump_interface_velocity(Path(vel_dump) / f"iface_vel_{self.n_remesh + 1:03d}.npz", st)
@@ -1805,7 +1839,7 @@ class StokesTipCoalescence(Problem):
             f"tip_radius={st['tip_radius']:.3e} ndof={self.ndof()}",
             flush=True,
         )
-        self._dt = self.dt_initial
+        self._dt = float(self._restart["dt"]) if self._restart else self.dt_initial
         status = "running"
         while self._steps < max_steps:
             if st["R_min"] >= self.R_stop:
