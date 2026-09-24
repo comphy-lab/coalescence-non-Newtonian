@@ -11,7 +11,9 @@ from pyoomph import Problem
 from pyoomph.solvers.scipy import SuperLUSerial
 from scipy.sparse import csr_matrix
 
-from problems.newtonian.coalescence_stokes_tip import MappedTipMesh, StokesTipCoalescence, validate_upper_interface
+from problems.newtonian.coalescence_stokes_tip import (
+    InvalidMovingFrameGeometry, MappedTipMesh, StokesTipCoalescence, validate_upper_interface,
+)
 from problems.newtonian.q2_geometry import signed_jacobian_range
 from runners.stokes_block_audit import _json_safe, _solve_serial_block
 
@@ -99,8 +101,17 @@ class NewtonGateTests(unittest.TestCase):
             with patch.object(problem, "_frame_shift_now", return_value=1e-6), patch.object(
                 problem, "get_mesh", return_value=bulk
             ):
-                with self.assertRaisesRegex(RuntimeError, "left the physical quadrant"):
+                with self.assertRaisesRegex(InvalidMovingFrameGeometry, "left the physical quadrant") as caught:
                     problem.validate_domain_geometry()
+                self.assertEqual(caught.exception.kind, "bulk_quadrant")
+
+    def test_valid_state_recovery_remesh_checks_cap_continuity(self) -> None:
+        before = {"t": 1e-8, "R_min": 1e-6, "volume": 4.18879, "tip_radius": 1e-18}
+        after = {**before, "volume": before["volume"] * (1 + 2e-7)}
+        StokesTipCoalescence.verify_recovery_remesh(before, after)
+        after["tip_radius"] = 3e-18
+        with self.assertRaisesRegex(RuntimeError, "tip radius excessively"):
+            StokesTipCoalescence.verify_recovery_remesh(before, after)
 
     def test_block_audit_uses_serial_superlu_without_mpi(self) -> None:
         import numpy as np
