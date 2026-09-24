@@ -46,7 +46,7 @@ from pyoomph.equations.generic import (
     ScalarField,
     WeakContribution,
 )
-from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff
+from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
