@@ -44,6 +44,7 @@ from pyoomph.equations.generic import (
     RemeshWhen,
     RemeshingOptions,
     ScalarField,
+    Scaling,
     WeakContribution,
 )
 from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
@@ -1019,9 +1020,13 @@ class StokesTipCoalescence(Problem):
             # would duplicate the point constraint.
             if self._R_ref is None:
                 self._R_ref = self.define_global_parameter(R_ref=self.R0)
-            self.add_equations(
-                (GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)) @ "globals"
-            )
+            globals_eqs = GlobalLagrangeMultiplier(R_neck=0) + InitialCondition(R_neck=self.R0)
+            if self.neck_frame_moving:
+                # The neck unknown is a coordinate-scale displacement; leaving
+                # it unscaled makes its global Newton column six decades larger
+                # than the mesh-coordinate columns when S=R0=1e-6.
+                globals_eqs += Scaling(R_neck=scale_factor("spatial"))
+            self.add_equations(globals_eqs @ "globals")
             if self.neck_frame_moving:
                 eqs += EnforcedBC(mesh_x=var("mesh_x") - var("lagrangian_x") * Rn / self._R_ref) @ "plane"
             else:
