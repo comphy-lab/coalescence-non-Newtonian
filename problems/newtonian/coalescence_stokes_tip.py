@@ -49,7 +49,6 @@ from pyoomph.equations.generic import (
     WeakContribution,
 )
 from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
-from pyoomph.expressions import grad, mesh_velocity, square_root, evaluate_in_past
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
 
@@ -393,59 +392,21 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
 
 
 class NeckMovingFreeSurface(NavierStokesFreeSurface):
-    """Use the physical interface velocity when the mesh stores X = r - R_neck.
+    """Use the physical interface velocity when the mesh stores X = r - R_neck."""
 
-    ``kinematic_upwind`` > 0 adds a streamline-upwind Petrov-Galerkin weighting to the kinematic
-    condition.  Interface nodes near the neck are held at fixed X, so the liquid surface streams
-    past them towards the neck at c = dR/dt - u_t and the discrete kinematic condition advects the
-    interface height with a grid Peclet number ~2c/(sigma/mu), independent of the element size.
-    The test function psi is augmented by upwind * (h/2) sign(w_t) d(psi)/ds, h the element arc
-    length and w_t the liquid velocity relative to the nodes along the tangent.  The added term
-    vanishes for the exact solution (it multiplies the kinematic residual) and changes no physics.
-    """
-
-    def __init__(self, neck_radius, kinematic_upwind: float = 0.0, frame_speed=None,
-                 upwind_velocity_floor: float = 1e-3):
+    def __init__(self, neck_radius):
         super().__init__(surface_tension=1.0)
         self.neck_radius = neck_radius
-        self.kinematic_upwind = float(kinematic_upwind)
-        self.frame_speed = frame_speed
-        self.upwind_velocity_floor = float(upwind_velocity_floor)
-        if self.kinematic_upwind > 0 and frame_speed is None:
-            raise ValueError("kinematic upwinding needs the frame-speed parameter")
 
     def define_residuals(self):
         super().define_residuals()
         # The parent contributes (dX/dt-u).n; physical mesh motion also has
         # dR_neck/dt in the radial direction. Keep u in the laboratory frame.
-        Rdot = partial_t(self.neck_radius, ALE=False)
         self.add_residual(weak(
-            Rdot * var("normal_x"),
+            partial_t(self.neck_radius, ALE=False) * var("normal_x"),
             testfunction(self.kinbc_name),
             coordsys=self.kinematic_bc_coordsys,
         ))
-        if self.kinematic_upwind > 0:
-            n = var("normal")
-            t = vector(-n[1], n[0])
-            u = var("velocity")
-            node_velocity = mesh_velocity() + vector(Rdot, 0)
-            kinematic_residual = dot(node_velocity - u, n)
-            # Upwind direction and element length from the previous converged state, with the
-            # frame speed as an explicit per-step parameter: near the neck the nodes are held at
-            # fixed X, so the liquid moves past them at (u - U_frame e_r).t.  Lagging keeps the
-            # weight free of current unknowns (exact Jacobian) and survives the impulsive restart,
-            # which zeroes the history of mesh velocity and dR/dt but keeps the velocity.
-            n_old = evaluate_in_past(n, apply_on_others=True)
-            t_old = vector(-n_old[1], n_old[0])
-            w_t = dot(evaluate_in_past(u), t_old) - self.frame_speed * t_old[0]
-            sign_w = w_t / square_root(w_t**2 + self.upwind_velocity_floor**2)
-            h = evaluate_in_past(var("cartesian_element_size_Eulerian"), apply_on_others=True)
-            weight = self.kinematic_upwind * 0.5 * h * sign_w
-            self.add_residual(weak(
-                kinematic_residual,
-                weight * dot(grad(testfunction(self.kinbc_name)), t),
-                coordsys=self.kinematic_bc_coordsys,
-            ))
 
 
 class MovingFrameAxisBC(EnforcedBC):
@@ -933,7 +894,6 @@ class StokesTipCoalescence(Problem):
         interface_grading: float = 0.0,
         interface_size_growth: float = 0.3,
         restart: dict[str, Any] | None = None,
-        kinematic_upwind: float = 0.0,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -1024,10 +984,6 @@ class StokesTipCoalescence(Problem):
         # size grows away from the interface at interface_size_growth per unit mapped distance.
         self.interface_grading = float(interface_grading)
         self.interface_size_growth = float(interface_size_growth)
-        # Streamline-upwind weighting of the moving-frame kinematic condition (0 = Galerkin).
-        self.kinematic_upwind = float(kinematic_upwind)
-        if self.kinematic_upwind < 0 or (self.kinematic_upwind and not neck_frame_moving):
-            raise ValueError("kinematic_upwind must be >= 0 and requires the moving neck frame")
         if self.interface_grading < 0 or self.interface_size_growth <= 0:
             raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
@@ -1108,7 +1064,6 @@ class StokesTipCoalescence(Problem):
                 raise RuntimeError("neck_frame requires the mapped template (tip_map_alpha > 0)")
             if self.neck_frame_moving:
                 self._R_ref = self.define_global_parameter(R_ref=self.R_start)
-                self._U_frame = self.define_global_parameter(U_frame=0.0) if self.kinematic_upwind > 0 else None
             self._R_shift = (
                 Rn / scale_factor("spatial") if self.neck_frame_moving
                 else self.define_global_parameter(R_shift=self.frame_shift_phys / self.S)
@@ -1158,8 +1113,7 @@ class StokesTipCoalescence(Problem):
             eqs += AxisymmetryBC() @ "axis"
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "plane"
         eqs += (
-            NeckMovingFreeSurface(Rn, kinematic_upwind=self.kinematic_upwind, frame_speed=self._U_frame)
-            if self.neck_frame_moving
+            NeckMovingFreeSurface(Rn) if self.neck_frame_moving
             else NavierStokesFreeSurface(surface_tension=1.0)
         ) @ "interface"
         if self.neck_stretch:
@@ -1913,8 +1867,6 @@ class StokesTipCoalescence(Problem):
                 self._dt = dt
                 self._predict_now = True
                 self._step_state_before_newton = st
-                if getattr(self, "_U_frame", None) is not None:
-                    self._U_frame.value = float(st["u_neck"])
                 try:
                     self.solve(timestep=dt, do_not_set_IC=True,
                                globally_convergent_newton=self.line_search)

@@ -56,7 +56,6 @@ def main() -> int:
     ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target relative change of the neck curvature per step")
     ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
     ap.add_argument("--restart-from", type=Path, default=None, help="restart/remesh_NNNN.npz written by an earlier moving-frame run")
-    ap.add_argument("--kinematic-upwind", type=float, default=0.0, help="streamline-upwind weight of the moving-frame kinematic condition (0 = Galerkin)")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -133,7 +132,6 @@ def main() -> int:
         tip_shrink_remesh=args.tip_shrink_remesh,
         interface_size_growth=args.interface_size_growth,
         restart=restart,
-        kinematic_upwind=args.kinematic_upwind,
     )
     pb.quiet()
     if args.seed_frozen_stokes:
