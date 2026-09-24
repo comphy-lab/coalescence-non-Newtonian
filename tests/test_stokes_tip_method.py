@@ -12,7 +12,8 @@ from pyoomph.solvers.scipy import SuperLUSerial
 from scipy.sparse import csr_matrix
 
 from problems.newtonian.coalescence_stokes_tip import (
-    InvalidMovingFrameGeometry, MappedTipMesh, StokesTipCoalescence, validate_upper_interface,
+    HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
+    StokesTipCoalescence, validate_upper_interface,
 )
 from problems.newtonian.q2_geometry import signed_jacobian_range
 from runners.stokes_block_audit import _json_safe, _solve_serial_block
@@ -194,8 +195,10 @@ class NewtonGateTests(unittest.TestCase):
         poly = [(1e-6, 0.0), (1e-6, 1e-21), (1e-6, 3e-20),
                 (1e-6, 4e-20), (1e-6, 5e-20)]
         # The first edge rises at its nodes but dips below the plane in between.
-        with self.assertRaisesRegex(RuntimeError, "quadratic edge crosses"):
+        with self.assertRaisesRegex(HiddenInterfacePlaneCrossing, "quadratic edge crosses") as caught:
             validate_upper_interface(poly, 1e-6)
+        self.assertEqual(caught.exception.segment, 0)
+        self.assertLess(caught.exception.minimum_z, 0.0)
 
     def test_invalid_tip_map_and_newton_controls_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as out:
