@@ -185,6 +185,26 @@ class NewtonGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "tip curvature changed"):
                     problem.actions_after_newton_solve()
 
+    def test_first_step_on_fresh_mesh_skips_only_the_curvature_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(
+                R0=1e-6, Z0=5e-13, output_dir=out, curvature_step_limit=0.2
+            )
+            problem._template = object()
+            problem._fresh_mesh = True
+            problem._step_state_before_newton = {"two_H": -1.0e16, "tip_radius": 1e-16}
+            with patch.object(problem, "last_newton_step_failed", return_value=False), patch.object(
+                problem, "interface_polyline", return_value=[(1e-6, 0), (1.1e-6, 1e-10), (1.2e-6, 2e-10), (1.3e-6, 3e-10)]
+            ), patch.object(
+                problem, "neck_state", return_value={"two_H": -1.3e16, "tip_radius": 1e-16}
+            ), patch.object(problem, "tip_unresolved", return_value=False), patch.object(
+                problem, "validate_domain_geometry"
+            ) as geometry, patch.object(problem, "_remesh_reason", return_value=None), patch.object(
+                Problem, "actions_after_newton_solve"
+            ):
+                problem.actions_after_newton_solve()
+                geometry.assert_called_once()
+
     def test_archived_folded_interface_is_rejected_before_remeshing(self) -> None:
         poly = [(1.0247792e-6, 0.0), (1.02500895e-6, -1.3285e-10),
                 (1.0253e-6, 2e-10), (1.026e-6, 4e-10)]
@@ -260,6 +280,7 @@ class NewtonGateTests(unittest.TestCase):
             self.assertEqual(problem.n_remesh, state["n_remesh"] + 1)
             self.assertEqual(problem._steps, state["steps"])
             self.assertEqual(problem.restart_poly[1], (1e-20, 1e-20))
+            self.assertTrue(problem._fresh_mesh)
 
 
 if __name__ == "__main__":
