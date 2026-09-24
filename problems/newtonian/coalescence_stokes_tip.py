@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import time
 
 import numpy
@@ -1440,6 +1441,24 @@ class StokesTipCoalescence(Problem):
             self._last_profile_bin = rb
             self.write_profile(poly, state)
 
+    def dump_interface_velocity(self, path: Path, state: dict[str, float]) -> None:
+        """Diagnostic: interface nodes in arclength order with frame X, z and lab velocity."""
+        from pyoomph.meshes.ordering import sort_line_segments
+
+        data, r, z, u, v = self._interface_nodes()
+        segs, _ = data.get_interface_line_segments()
+        pts = data.get_coordinates()
+        segs = sort_line_segments(pts, segs, sort_along_axis="y+", whom="interface")
+        order = []
+        for seg in segs:
+            for i in seg:
+                if not order or order[-1] != i:
+                    order.append(int(i))
+        idx = numpy.asarray(order)
+        numpy.savez(path, X=numpy.asarray(r)[idx], z=numpy.asarray(z)[idx], u=numpy.asarray(u)[idx],
+                    v=numpy.asarray(v)[idx], R_min=state["R_min"], u_neck=state["u_neck"], t=state["t"],
+                    shift=self._frame_shift_now())
+
     def write_profile(self, poly: list[tuple[float, float]], state: dict[str, float], tag: str = "") -> None:
         path = self.output_root / "profiles" / (
             f"interface_t{state['t']:.8e}_R{state['R_min']:.8e}{tag}.dat"
@@ -1671,6 +1690,9 @@ class StokesTipCoalescence(Problem):
             self._R_ref.value = st["R_min"]
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
+        vel_dump = os.environ.get("LA0_VEL_DUMP")
+        if vel_dump:
+            self.dump_interface_velocity(Path(vel_dump) / f"iface_vel_{self.n_remesh + 1:03d}.npz", st)
         if self.neck_frame_moving:
             # X_neck is pinned at zero throughout the timestep; no coordinate
             # translation or global-parameter update is needed at remeshing.

@@ -53,6 +53,8 @@ def main() -> int:
     ap.add_argument("--tip-rel-floor", type=float, default=0.0, help="smallest tip element relative to R_neck on the mapped mesh (double-precision solve floor); 0 = off")
     ap.add_argument("--interface-grading", type=float, default=0.0, help="tip-distance grading on the interface (mapped mesh); 0 = --grading")
     ap.add_argument("--interface-size-growth", type=float, default=0.3, help="growth of the element size with mapped distance from the interface")
+    ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target relative change of the neck curvature per step")
+    ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -117,6 +119,8 @@ def main() -> int:
         min_newton_iterations=args.min_newton,
         curvature_step_limit=args.curvature_step_limit,
         interface_grading=args.interface_grading,
+        curvature_change_target=args.curvature_change_target,
+        tip_shrink_remesh=args.tip_shrink_remesh,
         interface_size_growth=args.interface_size_growth,
     )
     pb.quiet()
