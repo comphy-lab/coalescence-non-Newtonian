@@ -1726,6 +1726,7 @@ class StokesTipCoalescence(Problem):
         self.write_restart_state(st)
         vel_dump = os.environ.get("LA0_VEL_DUMP")
         if vel_dump:
+            Path(vel_dump).mkdir(parents=True, exist_ok=True)
             self.dump_interface_velocity(Path(vel_dump) / f"iface_vel_{self.n_remesh + 1:03d}.npz", st)
         if self.neck_frame_moving:
             # X_neck is pinned at zero throughout the timestep; no coordinate
