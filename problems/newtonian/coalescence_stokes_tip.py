@@ -55,6 +55,14 @@ from .geometry import sphere_bridge_junction, sphere_centre
 from .q2_geometry import signed_jacobian_range
 
 
+class InvalidMovingFrameGeometry(RuntimeError):
+    """A converged Newton candidate has inadmissible moving-frame geometry."""
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+
+
 def validate_upper_interface(poly: list[tuple[float, float]], r0: float) -> None:
     """Reject any Q2 upper-interface segment that crosses the symmetry plane."""
     if len(poly) < 4:
@@ -927,6 +935,9 @@ class StokesTipCoalescence(Problem):
         self._steps = 0
         self._dt = self.dt_initial
         self._dt_prev: float | None = None
+        self._quality_recovery_streak = 0
+        self._quality_recovery_start = self.R0
+        self.n_quality_recovery_events = 0
         self._predict_now = False
         self._wall0 = time.time()
 
@@ -1102,13 +1113,13 @@ class StokesTipCoalescence(Problem):
             r = self.S * node.x(0) + shift
             z = self.S * node.x(1)
             if not (math.isfinite(r) and math.isfinite(z)) or r < -tolerance or z < -tolerance:
-                raise RuntimeError(f"moving-frame bulk node left the physical quadrant: r={r:.6e}, z={z:.6e}")
+                raise InvalidMovingFrameGeometry("bulk_quadrant", f"moving-frame bulk node left the physical quadrant: r={r:.6e}, z={z:.6e}")
         for node in self.get_mesh("drop/axis").nodes():
             if abs(self.S * node.x(0) + shift) > tolerance:
-                raise RuntimeError("moving-frame axis node left r=0")
+                raise InvalidMovingFrameGeometry("axis", "moving-frame axis node left r=0")
         for element in self.get_mesh("drop").elements():
             if element.nnode() != 6:
-                raise RuntimeError("moving-frame geometry gate expects six-node Q2 triangles")
+                raise InvalidMovingFrameGeometry("element_type", "moving-frame geometry gate expects six-node Q2 triangles")
             local = numpy.array([element.local_coordinate_of_node(i) for i in range(6)])
             nodes = [element.node_pt(i) for i in range(6)]
             reference = numpy.array([[node.x_lagr(0), node.x_lagr(1)] for node in nodes])
@@ -1121,9 +1132,9 @@ class StokesTipCoalescence(Problem):
             elif ref_max < -tolerance_j:
                 valid = cur_max < -tolerance_j
             else:
-                raise RuntimeError("moving-frame reference Q2 element is singular or folded")
+                raise InvalidMovingFrameGeometry("reference_jacobian", "moving-frame reference Q2 element is singular or folded")
             if not valid:
-                raise RuntimeError("moving-frame Q2 element has a nonpositive signed Jacobian")
+                raise InvalidMovingFrameGeometry("signed_jacobian", "moving-frame Q2 element has a nonpositive signed Jacobian")
 
     def _snap_moving_axis(self, radius: float | None = None) -> None:
         """Put mapped axis nodes and their reference coordinates exactly at r=0."""
@@ -1641,6 +1652,21 @@ class StokesTipCoalescence(Problem):
             flush=True,
         )
 
+    @staticmethod
+    def verify_recovery_remesh(before: dict[str, float], after: dict[str, float]) -> None:
+        """Reject a recovery remesh that materially changes the last valid state."""
+        if abs(after["t"] - before["t"]) > 1e-12 * max(abs(before["t"]), 1e-30):
+            raise RuntimeError("valid-state recovery remesh changed physical time")
+        if abs(after["R_min"] - before["R_min"]) > 1e-6 * before["R_min"]:
+            raise RuntimeError("valid-state recovery remesh changed neck radius")
+        if abs(after["volume"] - before["volume"]) > 1e-5 * before["volume"]:
+            raise RuntimeError("valid-state recovery remesh changed volume excessively")
+        if (math.isfinite(before["tip_radius"]) and math.isfinite(after["tip_radius"])
+                and before["tip_radius"] > 0 and after["tip_radius"] > 0):
+            ratio = after["tip_radius"] / before["tip_radius"]
+            if not 0.5 <= ratio <= 2.0:
+                raise RuntimeError("valid-state recovery remesh changed tip radius excessively")
+
     # ------------------------------------------------------------------ drive
     def choose_dt(self, st: dict[str, float]) -> float:
         """Step-size controller.
@@ -1704,6 +1730,7 @@ class StokesTipCoalescence(Problem):
                 dt = self.limit_dt_after_history_reset(dt, st)
                 self._regrow = True
             remesh_before_step = self.n_remesh
+            quality_remesh_used = False
             for _attempt in range(6):
                 snapshot = self._dof_snapshot()
                 self._dt = dt
@@ -1726,6 +1753,33 @@ class StokesTipCoalescence(Problem):
                     except Exception as diag_exc:
                         print(f"residual diagnosis unavailable: {diag_exc!r}", flush=True)
                     self._predict_now = False
+                    if (isinstance(exc, InvalidMovingFrameGeometry)
+                            and exc.kind == "bulk_quadrant"
+                            and self.neck_frame_moving and not quality_remesh_used
+                            and self._template is not None):
+                        try:
+                            self._dof_restore(snapshot)
+                            self.validate_domain_geometry()
+                            valid_poly = self.interface_polyline()
+                            validate_upper_interface(valid_poly, self.R0)
+                            valid_state = self.neck_state()
+                            self._pending_remesh_reason = "valid-state recovery after rejected bulk-quadrant trial"
+                            old_generation = self.n_remesh
+                            if not self.force_remesh({self._template}) or self.n_remesh != old_generation + 1:
+                                raise RuntimeError("valid-state quality remesh did not replace the mesh")
+                            recovered_state = self.neck_state()
+                            self.validate_domain_geometry()
+                            self.verify_recovery_remesh(valid_state, recovered_state)
+                            if abs(self.interface_polyline()[-1][1] - valid_poly[-1][1]) > 1e-5:
+                                raise RuntimeError("valid-state recovery remesh moved the pole excessively")
+                        except Exception as recovery_exc:
+                            raise RuntimeError("valid-state quality remesh failed; stopping") from recovery_exc
+                        print(f"VALID-STATE QUALITY REMESH #{self.n_remesh}; retrying reduced dt", flush=True)
+                        self.n_quality_recovery_events += 1
+                        quality_remesh_used = True
+                        st = recovered_state
+                        dt *= 0.3
+                        continue
                     if "Cannot invert spline" in repr(exc) and self._template is not None:
                         # The failure is in building the NEW mesh's macro elements; the old mesh is
                         # still the live one.  Retry the remesh with coarser tip-zone sampling.
@@ -1758,6 +1812,17 @@ class StokesTipCoalescence(Problem):
             self._steps += 1
             st_prev = st
             st = self.neck_state()
+            quality_stall = False
+            if quality_remesh_used:
+                if self._quality_recovery_streak == 0:
+                    self._quality_recovery_start = st_prev["R_min"]
+                self._quality_recovery_streak += 1
+                if (self._quality_recovery_streak >= 3
+                        and (st["R_min"] - self._quality_recovery_start) / self._quality_recovery_start < 1e-5):
+                    print("valid-state quality remesh repeated without meaningful neck growth", flush=True)
+                    quality_stall = True
+            else:
+                self._quality_recovery_streak = 0
             if self.line_search and self.neck_frame_moving:
                 growth = st["R_min"] - st_prev["R_min"]
                 expected = dt * st["u_neck"]
@@ -1776,6 +1841,9 @@ class StokesTipCoalescence(Problem):
             except Exception:
                 pass
             self.write_row(st, dt, iters)
+            if quality_stall:
+                status = "quality_remesh_stall"
+                break
             if self._steps % 10 == 0 or self._steps < 10:
                 print(
                     f"step {self._steps} t={st['t']:.6e} dt={dt:.3e} R={st['R_min']:.6e} "
@@ -1788,6 +1856,7 @@ class StokesTipCoalescence(Problem):
             "steps": self._steps,
             "final": st,
             "n_remesh": self.n_remesh,
+            "n_quality_recovery_events": self.n_quality_recovery_events,
             "wall_s": time.time() - self._wall0,
             "parameters": {
                 "R0": self.R0, "Z0": self.Z0, "n_tip": self.n_tip, "grading": self.grading,
