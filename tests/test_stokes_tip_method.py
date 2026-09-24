@@ -232,6 +232,35 @@ class NewtonGateTests(unittest.TestCase):
             problem.tip_map_linear_core = 0.0
             self.assertTrue(problem.tip_unresolved(4e-17))
 
+    def test_interface_grading_controls_are_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaisesRegex(ValueError, "interface_grading"):
+                StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out, interface_grading=-0.1)
+            with self.assertRaisesRegex(ValueError, "interface_size_growth"):
+                StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out, interface_size_growth=0.0)
+
+    def test_restart_state_sets_the_remeshed_start(self) -> None:
+        state = {
+            "poly": [(0.0, 0.0), (1e-20, 1e-20), (-1.1e-6, 1.0)], "t": 2.8e-12,
+            "R_min": 1.000008e-6, "u_neck": 3.12, "tip_radius_lagged": 2.4e-14,
+            "rho_at_remesh": 2.4e-14, "n_remesh": 7, "steps": 69, "dt": 7.8e-14,
+            "frame_shift_phys": 1.000008e-6,
+        }
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaisesRegex(ValueError, "moving neck frame"):
+                StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out, restart=state)
+            problem = StokesTipCoalescence(
+                R0=1e-6, Z0=5e-13, output_dir=out, tip_map_alpha=0.5,
+                neck_frame=True, neck_frame_moving=True, restart=state,
+            )
+            self.assertEqual(problem.R_start, state["R_min"])
+            self.assertEqual(problem.frame_shift_phys, state["R_min"])
+            self.assertEqual(problem.rmin_at_remesh, state["R_min"])
+            self.assertEqual(problem.tip_radius_lagged, state["tip_radius_lagged"])
+            self.assertEqual(problem.n_remesh, state["n_remesh"] + 1)
+            self.assertEqual(problem._steps, state["steps"])
+            self.assertEqual(problem.restart_poly[1], (1e-20, 1e-20))
+
 
 if __name__ == "__main__":
     unittest.main()
