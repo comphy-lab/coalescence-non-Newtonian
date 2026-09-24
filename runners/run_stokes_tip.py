@@ -80,6 +80,8 @@ def main() -> int:
         "argv": sys.argv,
     }
     restart = None
+    if args.restart_from is not None and not args.seed_frozen_stokes:
+        raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
     if args.restart_from is not None:
         import numpy as np
         with np.load(args.restart_from) as data:
