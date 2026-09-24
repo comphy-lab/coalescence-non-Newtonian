@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pyoomph import Problem
 
@@ -60,6 +60,23 @@ class NewtonGateTests(unittest.TestCase):
             )
             with patch.object(Problem, "add_equations", lambda self, equations: None):
                 problem.define_problem()
+
+    def test_moving_axis_is_snapped_before_history_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(
+                R0=1e-6, Z0=5e-13, output_dir=out, spatial_scale=1e-6,
+                tip_map_alpha=0.5, neck_frame=True, neck_frame_moving=True,
+            )
+            nodes = [Mock(), Mock()]
+            axis, bulk = Mock(), Mock()
+            axis.nodes.return_value = nodes
+            with patch.object(problem, "_frame_shift_now", return_value=1e-6), patch.object(
+                problem, "get_mesh", side_effect=lambda name: axis if name == "drop/axis" else bulk
+            ), patch.object(problem, "invalidate_cached_mesh_data"):
+                problem._snap_moving_axis()
+            for node in nodes:
+                node.set_x.assert_called_once_with(0, -1.0)
+            bulk.set_lagrangian_nodal_coordinates.assert_called_once_with()
 
     def test_extra_newton_is_rejected_and_gate_uses_original_solve_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as out:

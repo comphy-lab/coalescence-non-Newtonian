@@ -1084,6 +1084,24 @@ class StokesTipCoalescence(Problem):
             return float(self.get_ode("globals").get_value("R_neck", as_float=True))
         return self.frame_shift_phys
 
+    def _snap_moving_axis(self) -> None:
+        """Put mapped axis nodes and their reference coordinates exactly at r=0."""
+        if not self.neck_frame_moving:
+            return
+        target = -self._frame_shift_now() / self.S
+        for node in self.get_mesh("drop/axis").nodes():
+            node.set_x(0, target)
+        self.get_mesh("drop").set_lagrangian_nodal_coordinates()
+        self.invalidate_cached_mesh_data()
+
+    def set_initial_condition(self, *args, **kwargs):
+        super().set_initial_condition(*args, **kwargs)
+        if self.neck_frame_moving:
+            # The ODE initial value is now assigned.  Gmsh inverse-mapping can
+            # leave axis nodes off r=0 by O(1e-11) at this case's scale.
+            self._snap_moving_axis()
+            self.assign_initial_values_impulsive()
+
     def interface_polyline(self) -> list[tuple[float, float]]:
         from pyoomph.meshes.ordering import sort_line_segments
 
@@ -1541,6 +1559,7 @@ class StokesTipCoalescence(Problem):
 
     def actions_after_remeshing(self):
         super().actions_after_remeshing()
+        self._snap_moving_axis()
         # Stokes carries no velocity history, and the interpolated position history of a
         # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
         # mesh velocity.  Restart the time integrator impulsively from the new geometry
@@ -1646,6 +1665,12 @@ class StokesTipCoalescence(Problem):
                     break
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
                     print(f"step failed at dt={dt:.3e}: {exc!r}; restoring and reducing", flush=True)
+                    try:
+                        print("NEWTON RESIDUAL HISTORY:", list(self.get_last_residual_convergence()), flush=True)
+                        if _attempt == 0 and "OomphException" in repr(exc):
+                            self.debug_largest_residual(4)
+                    except Exception as diag_exc:
+                        print(f"residual diagnosis unavailable: {diag_exc!r}", flush=True)
                     self._predict_now = False
                     if "Cannot invert spline" in repr(exc) and self._template is not None:
                         # The failure is in building the NEW mesh's macro elements; the old mesh is
@@ -1708,6 +1733,7 @@ class StokesTipCoalescence(Problem):
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,
+                "max_residuals_cap": self.max_residuals_cap,
                 "min_newton_iterations": self.min_newton_iterations,
                 "curvature_step_limit": self.curvature_step_limit,
                 "neck_frame": self.neck_frame,
