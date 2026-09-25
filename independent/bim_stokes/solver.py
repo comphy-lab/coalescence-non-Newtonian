@@ -3,17 +3,19 @@
 With the geometry frozen at step n, the traction at the new position is
 linearised in the normal displacement eta = dt (u . N),
 
-    kappa^{n+1} ~ kappa^n - Lap_s eta - (k1^2 + k2^2) eta,
+    kappa^{n+1} ~ kappa^n + J eta,   J = -(Lap_s + k1^2 + k2^2) + O(h^2),
 
-so that the boundary-integral equation for the new velocity is the dense
-linear system
+with J the exact Jacobian of the nodal spline curvature (Meridian.
+curvature_jacobian), so that the boundary-integral equation for the new
+velocity is the dense linear system
 
-    [1/2 I + K/(8 pi) - (dt/8 pi) S D] u = -(1/8 pi) S (kappa^n N),
-    D u = N (Lap_s + k1^2 + k2^2)(N . u),
+    [C + K/(8 pi) - (dt/8 pi) S_f D] u - (1/8 pi) S_D f_z = -(1/8 pi) S_f (kappa^n N),
+    D u = -N J (N . u),
 
-which removes the capillary stability limit of the smallest panel.  Points move
-with the normal velocity in the neck-anchored frame; the curve is then resampled
-along its spline with the tip-graded spacing.
+on the half body (free surface S_f plus the symmetry-plane disc D, on which u_r
+and f_z are the unknowns); this removes the capillary stability limit of the
+smallest panel.  Points move with the normal velocity in the neck-anchored
+frame; the curve is then resampled along its spline with the tip-graded spacing.
 """
 
 from __future__ import annotations
@@ -26,72 +28,56 @@ from pathlib import Path
 
 import numpy as np
 
-from .geometry import Meridian, target_spacing
-from .operators import Assembler
+from .geometry import Meridian, disc_for, target_spacing
+from .operators import Assembler, Operators
 
 
-def laplace_beltrami(mer: Meridian) -> np.ndarray:
-    """Nodal matrix of Lap_s eta = eta'' + (r'/r) eta' (2 eta'' at the pole), eta even at both ends."""
-    n = mer.n + 1
-    s = mer.sigma
-    (tX, _), _, _, _, _ = mer.node_frame()
-    r = mer.r
-    Lm = np.zeros((n, n))
-    for i in range(n):
-        if i == 0:
-            hm = hp = s[1] - s[0]
-            im, ip = 1, 1
-        elif i == n - 1:
-            hm = hp = s[i] - s[i - 1]
-            im, ip = i - 1, i - 1
-        else:
-            hm, hp = s[i] - s[i - 1], s[i + 1] - s[i]
-            im, ip = i - 1, i + 1
-        c_m = 2.0 / (hm * (hm + hp))
-        c_0 = -2.0 / (hm * hp)
-        c_p = 2.0 / (hp * (hm + hp))
-        d_m = -hp / (hm * (hm + hp))
-        d_0 = (hp - hm) / (hm * hp)
-        d_p = hm / (hp * (hm + hp))
-        if i == n - 1:
-            cm2, c02, cp2 = 2 * c_m, 2 * c_0, 2 * c_p
-            Lm[i, im] += cm2 + cp2
-            Lm[i, i] += c02
-            continue
-        g = tX[i] / r[i] if i > 0 else 0.0      # r'/r; zero at the neck (r' = 0 there)
-        Lm[i, im] += c_m + g * d_m
-        Lm[i, i] += c_0 + g * d_0
-        Lm[i, ip] += c_p + g * d_p
-    return Lm
+def operators(mer: Meridian, assembler_kwargs=None, disc_kwargs=None) -> Operators:
+    """Assembled half-body operators for the current geometry (reusable across implicit steps)."""
+    disc = disc_for(mer, **(disc_kwargs or {}))
+    return Assembler(mer, disc, **(assembler_kwargs or {})).assemble()
 
 
-def operators(mer: Meridian, assembler_kwargs=None):
-    """Assembled S and K for the current geometry (reusable across implicit steps)."""
-    return Assembler(mer, **(assembler_kwargs or {})).assemble()
+def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operators | None = None,
+                   disc_kwargs=None, full: bool = False):
+    """Free-surface nodal velocity (u_r, u_z) of the linearly implicit step of size dt.
 
-
-def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops=None):
-    """Nodal velocity (u_r, u_z) of the linearly implicit step of size dt."""
-    S, K = ops if ops is not None else operators(mer, assembler_kwargs)
-    n = mer.n + 1
+    With full=True also returns the disc radial velocity (nodes 1..M) and the disc
+    normal traction f_z (nodes 0..M).
+    """
+    if ops is None:
+        ops = operators(mer, assembler_kwargs, disc_kwargs)
+    N, M, nr, nu, nf = ops.N, ops.M, ops.n_row, ops.n_u, ops.n_f
+    n = N + 1
     (_, _), (Nr, Nz), k1, k2, _ = mer.node_frame()
     kappa = k1 + k2
     G0 = -np.concatenate([kappa * Nr, kappa * Nz])
-    L = laplace_beltrami(mer) + np.diag(k1 * k1 + k2 * k2)
+    L = -mer.curvature_jacobian()
     # Linearised in the laboratory normal displacement dt (u . N): this is the shape
     # change (the frame-relative update in advance() differs only by a tangential slip),
     # and for a translating circular tip -Lap_s N_r - k1^2 N_r = 0, so the tip's
     # translation adds no spurious curvature.
     Nmat = np.hstack([np.diag(Nr), np.diag(Nz)])                 # (n, 2n): N . u
     D = np.vstack([np.diag(Nr), np.diag(Nz)]) @ L @ Nmat         # (2n, 2n)
-    A = 0.5 * np.eye(2 * n) + K / (8 * math.pi) - (dt / (8 * math.pi)) * (S @ D)
-    rhs = S @ G0 / (8 * math.pi)
-    for row in (n, n - 1):          # u_z = 0 at the neck, u_r = 0 at the pole
-        A[row, :] = 0.0
-        A[row, row] = 1.0
-        rhs[row] = 0.0
-    U = np.linalg.solve(A, rhs)
-    return U[:n], U[n:]
+    k8 = 8.0 * math.pi
+    sf_f = np.concatenate([np.arange(n), nf + np.arange(n)])     # free-surface traction columns
+    sf_u = np.concatenate([np.arange(n), nu + np.arange(n)])     # free-surface velocity columns
+    S_f = ops.S[:, sf_f]
+    Au = ops.C + ops.K / k8
+    Au[:, sf_u] -= (dt / k8) * (S_f @ D)
+    Af = -ops.S[:, nf + N + 1 + np.arange(M + 1)] / k8           # disc f_z columns
+    rhs = S_f @ G0 / k8
+    fixed = {nu + 0, N, N + M} | {nu + N + q for q in range(1, M + 1)}   # u_z(P), u_r(pole), u_r(axis), disc u_z
+    u_cols = np.array([c for c in range(2 * nu) if c not in fixed])
+    rows = np.array([r for r in range(2 * nr) if r not in (N, N + M)])  # trivial r-rows on the axis
+    A = np.hstack([Au[np.ix_(rows, u_cols)], Af[rows]])
+    x = np.linalg.solve(A, rhs[rows])
+    U = np.zeros(2 * nu)
+    U[u_cols] = x[:u_cols.size]
+    ur, uz = U[:n], U[nu:nu + n]
+    if full:
+        return ur, uz, U[n:nu], x[u_cols.size:]
+    return ur, uz
 
 
 def advance(mer: Meridian, dt: float, ur: np.ndarray, uz: np.ndarray) -> Meridian:
@@ -107,17 +93,17 @@ def advance(mer: Meridian, dt: float, ur: np.ndarray, uz: np.ndarray) -> Meridia
     return Meridian(R_n=mer.R_n + dt * U, X=X, z=z)
 
 
-def step_extrapolated(mer: Meridian, dt: float, assembler_kwargs=None):
+def step_extrapolated(mer: Meridian, dt: float, assembler_kwargs=None, disc_kwargs=None):
     """Second-order, L-stable step: 2 x(two half steps) - x(one full step).
 
     Both paths move the same nodes (no resampling inside the step), so the two
     surfaces are combined node by node; the full step reuses the operators of the
     first half step.  Returns the unresampled meridian and the mean neck speed.
     """
-    ops0 = operators(mer, assembler_kwargs)
+    ops0 = operators(mer, assembler_kwargs, disc_kwargs)
     ur, uz = solve_velocity(mer, 0.5 * dt, ops=ops0)
     half = advance(mer, 0.5 * dt, ur, uz)
-    ur2, uz2 = solve_velocity(half, 0.5 * dt, assembler_kwargs)
+    ur2, uz2 = solve_velocity(half, 0.5 * dt, assembler_kwargs, disc_kwargs=disc_kwargs)
     hh = advance(half, 0.5 * dt, ur2, uz2)
     urf, uzf = solve_velocity(mer, dt, ops=ops0)
     full = advance(mer, dt, urf, uzf)
@@ -188,7 +174,8 @@ def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | 
         if step - steps0 >= cfg.max_steps or time.time() - wall0 > cfg.max_wall_s:
             status = "limit"
             break
-        moved, U = step_extrapolated(mer, dt, cfg.assembler)
+        moved, U = step_extrapolated(mer, dt, cfg.assembler,
+                                     dict(k=cfg.k, n_tip=cfg.n_tip, h_max=cfg.h_max))
         mer = resample(moved, cfg.k, cfg.n_tip, cfg.h_max)
         t += dt
         step += 1

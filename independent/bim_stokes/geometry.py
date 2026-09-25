@@ -99,6 +99,34 @@ class Meridian:
         k1, _ = self.neck_curvature()
         return 1.0 / abs(k1)
 
+    def curvature_jacobian(self) -> np.ndarray:
+        """J_ij = d(k1 + k2)_i / d eta_j for normal displacements eta of the nodes.
+
+        The linearisation of exactly the spline curvature used for the traction:
+        the perturbation eta_j N_j is interpolated by the same ghost-extended
+        spline, at fixed parameter, so that the implicit capillary term has the
+        stiffness of the discrete curvature operator (a three-point Laplacian
+        underestimates it threefold for the grid-scale mode).
+        """
+        g, n = N_GHOST, self.n + 1
+        s = self.sigma
+        (_, _), (Nr, Nz), k1, _, sp = self.frame(s)
+        Er, Ez = np.diag(Nr), np.diag(Nz)
+        Yr = np.concatenate([Er[g:0:-1], Er, -Er[-2:-2 - g:-1]])      # r even at the neck, odd at the axis
+        Yz = np.concatenate([-Ez[g:0:-1], Ez, Ez[-2:-2 - g:-1]])      # z odd at the neck, even at the axis
+        spr, spz = CubicSpline(self._s_ext, Yr, axis=0), CubicSpline(self._s_ext, Yz, axis=0)
+        dr1, dr2, dz1, dz2 = spr(s, 1), spr(s, 2), spz(s, 1), spz(s, 2)
+        X1, z1 = (v[:, None] for v in self.eval(s, 1))
+        X2, z2 = (v[:, None] for v in self.eval(s, 2))
+        q = sp[:, None]
+        dot = X1 * dr1 + z1 * dz1
+        dk1 = (dr1 * z2 + X1 * dz2 - dz1 * X2 - z1 * dr2) / q**3 - 3.0 * k1[:, None] * dot / q**2
+        r = self.r[:, None]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dk2 = dz1 / (q * r) - z1 * dot / (q**3 * r) - (z1 / (q * r * r)) * Er
+        dk2[-1] = dk1[-1]                                           # k2 = k1 on the axis
+        return dk1 + dk2
+
     def volume(self, order: int = 16) -> float:
         """V = (2 pi / 3) oint r (x . N) dl over the full meridian (twice the upper half)."""
         x, w = np.polynomial.legendre.leggauss(order)
@@ -151,6 +179,60 @@ def local_differences(a, b, d):
     speed = np.hypot(Xp, zp)
     c0 = d * d * ((a1 * b2 - a2 * b1) + d * (2.0 * (a1 * b3 - a3 * b1) + d * (a2 * b3 - a3 * b2))) / speed
     return dX, dz, c0, speed, (zp / speed, -Xp / speed)
+
+
+@dataclass
+class Disc:
+    """The symmetry-plane disc z = 0, 0 <= r <= R_n, bounding the upper drop.
+
+    Node 0 is the neck point P (X = 0), node M is on the axis (X = -R_n).  The
+    parameter is the distance from P, sigma = -X; the outward normal of the
+    upper drop is -e_z.
+    """
+
+    R_n: float
+    X: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.X = np.asarray(self.X, dtype=float).copy()
+        if self.X[0] != 0.0:
+            raise ValueError("disc node 0 must be the neck point")
+        self.X[-1] = -self.R_n
+        self.sigma = -self.X
+
+    @property
+    def n(self) -> int:
+        return len(self.X) - 1
+
+    @property
+    def r(self) -> np.ndarray:
+        return self.X + self.R_n
+
+    @staticmethod
+    def geom(sigma):
+        """X, z, N_r, N_z and |x'| at parameters sigma."""
+        sigma = np.asarray(sigma, dtype=float)
+        one = np.ones_like(sigma)
+        return -sigma, 0.0 * one, 0.0 * one, -one, one
+
+
+def disc_for(mer: Meridian, k: float = 0.1, n_tip: int = 16, h_max: float = 0.02,
+             growth: float = 1.3) -> Disc:
+    """Disc nodes with spacing min(max(k d, rho/n_tip), h_max, R_n/10), d the distance from P."""
+    rho, R = mer.tip_radius(), mer.R_n
+    h_cap = min(h_max, 0.1 * R)
+    sig = [0.0]
+    h_prev = rho / n_tip
+    while True:
+        h = min(max(k * sig[-1], rho / n_tip), h_cap, growth * h_prev)
+        h_prev = h
+        if sig[-1] + h >= R - 0.5 * h:
+            break
+        sig.append(sig[-1] + h)
+    sig.append(R)
+    if len(sig) < 5:
+        sig = list(np.linspace(0.0, R, 5))
+    return Disc(R_n=R, X=-np.array(sig))
 
 
 # ----------------------------------------------------------------- spacing
