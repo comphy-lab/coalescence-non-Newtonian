@@ -1,4 +1,4 @@
-"""Gate K2: the boundary-integral identity for exact interior Stokes flows."""
+"""Gate K2: the half-body boundary-integral identity for exact interior Stokes flows."""
 
 from __future__ import annotations
 
@@ -7,52 +7,64 @@ import unittest
 
 import numpy as np
 
-from independent.bim_stokes.geometry import Meridian, anthony_initial_meridian
+from independent.bim_stokes.geometry import Meridian, anthony_initial_meridian, disc_for
 from independent.bim_stokes.operators import Assembler
 
 
-def _flows(mer):
-    (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
-    r, z = mer.r, mer.z
-    strain = (np.concatenate([-r / 2, z]), np.concatenate([-Nr, 2 * Nz]))
+def _flows(ops):
+    ru, zu = ops.velocity_points()
+    r, z, Nr, Nz = ops.traction_points()
+    out = {"strain": (np.concatenate([-ru / 2, zu]), np.concatenate([-Nr, 2 * Nz]))}
     p = r * r - 2 * z * z                                    # u = (r z^2, -2 z^3/3)
-    fr = (-p + 2 * z * z) * Nr + 2 * r * z * Nz
-    fz = 2 * r * z * Nr + (-p - 4 * z * z) * Nz
-    quadratic = (np.concatenate([r * z * z, -2 * z**3 / 3]), np.concatenate([fr, fz]))
-    return {"strain": strain, "quadratic": quadratic}
-
-
-def _residual(mer):
-    S, K = Assembler(mer).assemble()
-    n = mer.n + 1
-    out = {}
-    for name, (U, F) in _flows(mer).items():
-        a, b, c = 0.5 * U, K @ U / (8 * math.pi), S @ F / (8 * math.pi)
-        res = a + b - c
-        res[n] = 0.0          # u_z at the neck and u_r at the pole are fixed by symmetry
-        res[mer.n] = 0.0
-        local = np.maximum.reduce([np.abs(a), np.abs(b), np.abs(c)])
-        out[name] = (np.abs(res), max(np.abs(a).max(), np.abs(b).max(), np.abs(c).max()), local)
+    out["quadratic"] = (np.concatenate([ru * zu * zu, -2 * zu**3 / 3]),
+                        np.concatenate([(-p + 2 * z * z) * Nr + 2 * r * z * Nz,
+                                        2 * r * z * Nr + (-p - 4 * z * z) * Nz]))
+    out["shear"] = (np.concatenate([ru * zu, -zu * zu]),     # u = (r z, -z^2), p = -2 z
+                    np.concatenate([4 * z * Nr + r * Nz, r * Nr - 2 * z * Nz]))
     return out
 
 
+def _residual(mer):
+    ops = Assembler(mer, disc_for(mer)).assemble()
+    out = {}
+    for name, (U, F) in _flows(ops).items():
+        a, b, c = ops.C @ U, ops.K @ U / (8 * math.pi), ops.S @ F / (8 * math.pi)
+        res = a + b - c
+        res[ops.N] = 0.0            # r-rows on the axis (pole and disc centre) are trivial
+        res[ops.N + ops.M] = 0.0
+        local = np.maximum.reduce([np.abs(a), np.abs(b), np.abs(c)])
+        out[name] = (np.abs(res), max(np.abs(a).max(), np.abs(b).max(), np.abs(c).max()), local)
+    return ops, out
+
+
 class IdentityTests(unittest.TestCase):
-    def test_sphere_identity_converges_at_fourth_order(self) -> None:
+    def test_edge_coefficient_is_that_of_a_right_angle(self) -> None:
+        th = np.linspace(0.0, math.pi / 2, 80)
+        ops, _ = _residual(Meridian(R_n=1.0, X=np.cos(th) - 1.0, z=np.sin(th)))
+        nr, nu = ops.n_row, ops.n_u
+        c = np.array([[ops.C[0, 0], ops.C[0, nu]], [ops.C[nr, 0], ops.C[nr, nu]]])
+        expected = np.array([[0.25, -0.5 / math.pi], [-0.5 / math.pi, 0.25]])
+        self.assertLess(np.abs(c - expected).max(), 1e-6)
+
+    def test_hemisphere_identity_converges_at_fourth_order(self) -> None:
         errs = []
-        for n in (60, 120):
+        for n in (80, 160):
             th = np.linspace(0.0, math.pi / 2, n)
-            res, scale, _ = _residual(Meridian(R_n=1.0, X=np.cos(th) - 1.0, z=np.sin(th)))["strain"]
+            _, out = _residual(Meridian(R_n=1.0, X=np.cos(th) - 1.0, z=np.sin(th)))
+            res, scale, _ = out["quadratic"]
             errs.append(res.max() / scale)
-        self.assertLess(errs[1], 1e-8)
+        self.assertLess(errs[1], 2e-8)
         self.assertGreater(errs[0] / errs[1], 10.0)
 
     def test_exact_bridge_identity_holds_to_the_double_precision_floor(self) -> None:
         mer = anthony_initial_meridian(1e-6, 5e-13)
-        for name, (res, scale, local) in _residual(mer).items():
+        ops, out = _residual(mer)
+        r, z = ops.velocity_points()
+        for name, (res, scale, local) in out.items():
             self.assertLess(res.max() / scale, 1e-7, name)
             # At the 1e-13..1e-19 tip scales: below 1e-6 of the row's own terms, or at the
             # absolute double-precision floor where the exact field itself is ~z.
-            tip = np.concatenate([np.hypot(mer.X, mer.z) < 1e-12] * 2)
+            tip = np.concatenate([np.hypot(r - mer.R_n, z) < 1e-12] * 2)
             ok = (res[tip] <= 1e-6 * local[tip]) | (res[tip] <= 1e-15)
             self.assertTrue(np.all(ok), name)
 
