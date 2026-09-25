@@ -127,6 +127,15 @@ class Meridian:
         dk2[-1] = dk1[-1]                                           # k2 = k1 on the axis
         return dk1 + dk2
 
+    def arclength_derivative(self) -> np.ndarray:
+        """Matrix of d/ds at the nodes for a nodal scalar that is even at the neck and the pole."""
+        g = N_GHOST
+        E = np.eye(self.n + 1)
+        Y = np.concatenate([E[g:0:-1], E, E[-2:-2 - g:-1]])
+        sp = CubicSpline(self._s_ext, Y, axis=0)
+        _, _, _, _, speed = self.frame(self.sigma)
+        return sp(self.sigma, 1) / speed[:, None]
+
     def volume(self, order: int = 16) -> float:
         """V = (2 pi / 3) oint r (x . N) dl over the full meridian (twice the upper half)."""
         x, w = np.polynomial.legendre.leggauss(order)
