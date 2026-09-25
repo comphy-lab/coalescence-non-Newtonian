@@ -101,14 +101,26 @@ offsets.
   3 × 10⁻³ peak to peak.
 - **Mass conservation.** The drop volume changes by less than 10⁻⁶ relative
   over the whole computation.
-- **Initial-radius independence.** For the registered R0 = 10⁻³, 5 × 10⁻⁴
-  and 10⁻⁴ computations, u_v agrees to better than 0.05% wherever the
-  trajectories overlap. The R0 = 10⁻⁶ trajectory differs from the R0 = 10⁻⁴
-  trajectory by a median of −0.075% over 2 × 10⁻⁴ ≤ R_min ≤ 0.03 (−0.06% at
-  R_min = 0.03). The larger excursions of up to 0.6% in that difference come
-  from the R0 = 10⁻⁴ computation, which uses a uniform grading of 0.2 and
-  sparse remeshing: its residual about a smooth fit is 0.12% RMS, against
-  less than 0.001% for the R0 = 10⁻⁶ computation.
+- **Initial-radius independence.** For the R0 = 10⁻³, 5 × 10⁻⁴ and 10⁻⁴
+  computations at a uniform grading of 0.2, u_v agrees to better than 0.05%
+  wherever the trajectories overlap. With the same resolution settings (bulk
+  grading 0.1, neck-zone grading 0.05, interface grading 0.035, remeshing
+  every 10% of growth; the R0 = 10⁻⁴ case keeps the laboratory frame and a
+  single map exponent of 0.6, which suffice at that radius), the R0 = 10⁻⁶
+  and R0 = 10⁻⁴ trajectories differ by 0.26%
+  at R_min = 2 × 10⁻⁴, where the R0 = 10⁻⁴ start is still relaxing, and by
+  +0.015 to +0.024% from R_min = 5 × 10⁻⁴ to 0.03 (median +0.019% and
+  95th percentile 0.095% over 2 × 10⁻⁴ ≤ R_min ≤ 0.03; Figure 2). At a given
+  radius the R0 = 10⁻⁶ computation is later by 2.5–2.7 × 10⁻⁵, the time it
+  spends reaching R_min = 10⁻⁴, and this offset is nearly constant.
+
+![Initial-radius independence](figures/initial-radius-independence-stokes.png)
+
+**Figure 2.** (a) R_min(t) from R0 = 10⁻⁶ and R0 = 10⁻⁴ with the same
+resolution settings, each from its own t = 0; (b) u_v(R_min) with the published Stokes
+markers; (c) relative difference in u_v over the shared range. No offsets
+are fitted. Vector version:
+[`figures/initial-radius-independence-stokes.pdf`](figures/initial-radius-independence-stokes.pdf).
 
 ## Comparison with the published figure
 
