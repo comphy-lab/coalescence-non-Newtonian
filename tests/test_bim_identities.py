@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from independent.bim_stokes.geometry import Meridian, anthony_initial_meridian, disc_for
-from independent.bim_stokes.operators import Assembler
+from independent.bim_stokes.operators import EDGE_COEFFICIENT, Assembler, edge_coefficient_from_identities
 
 
 def _flows(ops):
@@ -41,10 +41,8 @@ class IdentityTests(unittest.TestCase):
     def test_edge_coefficient_is_that_of_a_right_angle(self) -> None:
         th = np.linspace(0.0, math.pi / 2, 80)
         ops, _ = _residual(Meridian(R_n=1.0, X=np.cos(th) - 1.0, z=np.sin(th)))
-        nr, nu = ops.n_row, ops.n_u
-        c = np.array([[ops.C[0, 0], ops.C[0, nu]], [ops.C[nr, 0], ops.C[nr, nu]]])
-        expected = np.array([[0.25, -0.5 / math.pi], [-0.5 / math.pi, 0.25]])
-        self.assertLess(np.abs(c - expected).max(), 1e-6)
+        c = edge_coefficient_from_identities(ops)
+        self.assertLess(np.abs(c - EDGE_COEFFICIENT).max(), 1e-6)
 
     def test_hemisphere_identity_converges_at_fourth_order(self) -> None:
         errs = []
