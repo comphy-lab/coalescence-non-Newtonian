@@ -6,11 +6,12 @@ linearised in the normal displacement eta = dt (u . N),
     kappa^{n+1} ~ kappa^n + J eta,   J = -(Lap_s + k1^2 + k2^2) + O(h^2),
 
 with J the exact Jacobian of the nodal spline curvature (Meridian.
-curvature_jacobian), so that the boundary-integral equation for the new
+curvature_jacobian) and the translation of the tip with the neck taken out of
+it (curvature_response), so that the boundary-integral equation for the new
 velocity is the dense linear system
 
     [C + K/(8 pi) - (dt/8 pi) S_f D] u - (1/8 pi) S_D f_z = -(1/8 pi) S_f (kappa^n N),
-    D u = -N J (N . u),
+    D u = -N (d kappa / d(dt u)) u,
 
 on the half body (free surface S_f plus the symmetry-plane disc D, on which u_r
 and f_z are the unknowns); this removes the capillary stability limit of the
@@ -30,6 +31,38 @@ import numpy as np
 
 from .geometry import Meridian, disc_for, target_spacing
 from .operators import Assembler, Operators
+
+
+def translation_weight(mer: Meridian) -> np.ndarray:
+    """1 within R_n/4 of the neck, 0 beyond R_n/2, smooth in between."""
+    x = (np.hypot(mer.X, mer.z) / mer.R_n - 0.25) / 0.25
+    x = np.clip(x, 0.0, 1.0)
+    return 1.0 - x * x * (3.0 - 2.0 * x)
+
+
+def curvature_response(mer: Meridian) -> np.ndarray:
+    """d kappa / d(dt u) at the nodes, (n, 2n) in the columns (u_r, u_z) of the free surface.
+
+    The shape change of a step is the laboratory normal displacement dt (u . N).  Near
+    the neck it is dominated by the translation U dt N_r of the tip with the neck
+    (U = u_r at P), which can exceed the tip radius many times over; its exact effect
+    is only the change -N_r U dt / r^2 of k2.  The translation is therefore taken out
+    of the Jacobian within the weight w (1 near the neck, 0 well away from it):
+
+        d kappa = J (N . u) dt - w [J N_r + N_r / r^2] U dt,
+
+    so that the linearisation acts only on the deformation relative to the moving tip
+    and does not depend on how accurately J represents a translation there.
+    """
+    (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
+    J = mer.curvature_jacobian()
+    w = translation_weight(mer)
+    R = J @ np.hstack([np.diag(Nr), np.diag(Nz)])
+    r = mer.r
+    with np.errstate(divide="ignore", invalid="ignore"):
+        exact = np.where(w > 0.0, Nr / np.where(r > 0.0, r * r, 1.0), 0.0)
+    R[:, 0] -= w * (J @ Nr) + w * exact
+    return R
 
 
 def operators(mer: Meridian, assembler_kwargs=None, disc_kwargs=None) -> Operators:
@@ -52,13 +85,7 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operato
     (_, _), (Nr, Nz), k1, k2, _ = mer.node_frame()
     kappa = k1 + k2
     G0 = -np.concatenate([kappa * Nr, kappa * Nz])
-    L = -mer.curvature_jacobian()
-    # Linearised in the laboratory normal displacement dt (u . N): this is the shape
-    # change (the frame-relative update in advance() differs only by a tangential slip),
-    # and for a translating circular tip -Lap_s N_r - k1^2 N_r = 0, so the tip's
-    # translation adds no spurious curvature.
-    Nmat = np.hstack([np.diag(Nr), np.diag(Nz)])                 # (n, 2n): N . u
-    D = np.vstack([np.diag(Nr), np.diag(Nz)]) @ L @ Nmat         # (2n, 2n)
+    D = -np.vstack([np.diag(Nr), np.diag(Nz)]) @ curvature_response(mer)   # (2n, 2n)
     k8 = 8.0 * math.pi
     sf_f = np.concatenate([np.arange(n), nf + np.arange(n)])     # free-surface traction columns
     sf_u = np.concatenate([np.arange(n), nu + np.arange(n)])     # free-surface velocity columns
