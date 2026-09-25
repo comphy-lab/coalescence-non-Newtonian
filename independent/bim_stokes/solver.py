@@ -78,6 +78,10 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops=None):
     kappa = k1 + k2
     G0 = -np.concatenate([kappa * Nr, kappa * Nz])
     L = laplace_beltrami(mer) + np.diag(k1 * k1 + k2 * k2)
+    # Linearised in the laboratory normal displacement dt (u . N): this is the shape
+    # change (the frame-relative update in advance() differs only by a tangential slip),
+    # and for a translating circular tip -Lap_s N_r - k1^2 N_r = 0, so the tip's
+    # translation adds no spurious curvature.
     Nmat = np.hstack([np.diag(Nr), np.diag(Nz)])                 # (n, 2n): N . u
     D = np.vstack([np.diag(Nr), np.diag(Nz)]) @ L @ Nmat         # (2n, 2n)
     A = 0.5 * np.eye(2 * n) + K / (8 * math.pi) - (dt / (8 * math.pi)) * (S @ D)
@@ -91,11 +95,13 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops=None):
 
 
 def advance(mer: Meridian, dt: float, ur: np.ndarray, uz: np.ndarray) -> Meridian:
-    """Move the nodes with the normal velocity in the neck frame (no resampling)."""
+    """Move the nodes with the frame-relative normal velocity (no resampling)."""
     (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
-    wn = ur * Nr + uz * Nz
     U = float(ur[0])
-    X = mer.X + dt * wn * Nr - dt * U
+    # Normal displacement relative to the neck frame; the frame itself moves by U dt.
+    # This equals the laboratory normal motion plus a tangential slip U dt t_r t.
+    wn = ur * Nr + uz * Nz - U * Nr
+    X = mer.X + dt * wn * Nr
     z = mer.z + dt * wn * Nz
     X[0], z[0] = 0.0, 0.0
     return Meridian(R_n=mer.R_n + dt * U, X=X, z=z)
