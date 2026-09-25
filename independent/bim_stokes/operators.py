@@ -13,9 +13,9 @@ The free-slip image across z = 0 is deliberately not used: it would turn the
 thin void gap ahead of the neck into a crack between the surface and its image,
 across which velocity jumps are nearly invisible to the second-kind equation
 (the smallest singular value then falls roughly as R0^3.5).  Here nothing lies
-across the gap.  At P the boundary has a right-angle edge; c(P) is obtained
-from the discrete operators by requiring the equation at P to hold for the
-rigid translation e_z and the straining flow (r, -2z).
+across the gap.  At P the boundary has a right-angle edge whose free-term
+coefficient is the exact right-angle value (checked against the discrete
+translation and straining identities).
 
 Unknown numbering.  Rows (collocation points) and velocity nodes: free-surface
 nodes 0..N (0 = P), then disc nodes 1..M (M on the axis).  Traction nodes:
@@ -320,22 +320,40 @@ class Assembler:
 
     # ------------------------------------------------------------- free term
     def _free_term(self, ops: Operators) -> np.ndarray:
+        """I/2 at smooth points; the exact right-angle edge coefficient at P.
+
+        At P the free surface leaves the disc vertically (tangent +e_z) while the
+        disc runs towards the axis (tangent -e_r): a right-angle edge with the
+        fluid in r < R_n, z > 0 whatever the neck radius.  Its free-term
+        coefficient is purely local, EDGE_COEFFICIENT below; edge_coefficient_
+        from_identities() recovers it from the discrete operators (to 1e-6 on a
+        hemisphere).  Fitting it from the identities in production is not
+        accurate at small R_n: the straining flow has u_r(P) = R_n, so the fit
+        divides quadrature-level residuals by R_n (about 4e-4 error at
+        R_n = 1e-6, enough to make the neck point lag its neighbours and the tip
+        sharpen without bound).
+        """
         nr, nu = self.n_row, self.n_u
         C = np.zeros((2 * nr, 2 * nu))
         i = np.arange(nr)
         C[i, i] = 0.5
         C[nr + i, nu + i] = 0.5
-        ru, zu = ops.velocity_points()
-        _, _, Nr, Nz = ops.traction_points()
-        k8 = 8.0 * math.pi
-        # rigid translation e_z: c_az(P) = -(K e_z)_a(P) / 8 pi
-        uz = np.concatenate([np.zeros(nu), np.ones(nu)])
-        Ku = ops.K @ uz / k8
-        c_rz, c_zz = -Ku[0], -Ku[nr]
-        # straining flow u = (r, -2z), p = 0, f = (2 N_r, -4 N_z); u(P) = (R_n, 0)
-        us = np.concatenate([ru, -2.0 * zu])
-        fs = np.concatenate([2.0 * Nr, -4.0 * Nz])
-        res = (ops.S @ fs - ops.K @ us) / k8
-        c_rr, c_zr = res[0] / us[0], res[nr] / us[0]
-        C[0, 0], C[0, nu], C[nr, 0], C[nr, nu] = c_rr, c_rz, c_zr, c_zz
+        c = EDGE_COEFFICIENT
+        C[0, 0], C[0, nu], C[nr, 0], C[nr, nu] = c[0, 0], c[0, 1], c[1, 0], c[1, 1]
         return C
+
+
+EDGE_COEFFICIENT = np.array([[0.25, -0.5 / math.pi], [-0.5 / math.pi, 0.25]])
+
+
+def edge_coefficient_from_identities(ops: Operators) -> np.ndarray:
+    """c(P) from the discrete operators: exact for the translation e_z and the straining flow (r, -2z)."""
+    nr, nu = ops.n_row, ops.n_u
+    ru, zu = ops.velocity_points()
+    _, _, Nr, Nz = ops.traction_points()
+    k8 = 8.0 * math.pi
+    Ku = ops.K @ np.concatenate([np.zeros(nu), np.ones(nu)]) / k8
+    c_rz, c_zz = -Ku[0], -Ku[nr]
+    us = np.concatenate([ru, -2.0 * zu])
+    res = (ops.S @ np.concatenate([2.0 * Nr, -4.0 * Nz]) - ops.K @ us) / k8
+    return np.array([[res[0] / us[0], c_rz], [res[nr] / us[0], c_zz]])
