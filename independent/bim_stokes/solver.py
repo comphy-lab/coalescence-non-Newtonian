@@ -15,8 +15,10 @@ velocity is the dense linear system
 
 on the half body (free surface S_f plus the symmetry-plane disc D, on which u_r
 and f_z are the unknowns); this removes the capillary stability limit of the
-smallest panel.  Points move with the normal velocity in the neck-anchored
-frame; the curve is then resampled along its spline with the tip-graded spacing.
+smallest panel.  The kinematics are linearly implicit as well (Kinematics): nodes
+near the neck move with it, nodes far away stay in the laboratory, and the normal
+displacement relative to that reference is advected implicitly along the surface.
+After each step the curve is resampled along its spline with the tip-graded spacing.
 """
 
 from __future__ import annotations
@@ -40,28 +42,62 @@ def translation_weight(mer: Meridian) -> np.ndarray:
     return 1.0 - x * x * (3.0 - 2.0 * x)
 
 
-def curvature_response(mer: Meridian) -> np.ndarray:
+@dataclass
+class Kinematics:
+    """Linearly implicit kinematics of one stage.
+
+    The reference curve moves radially with w U (with the neck near the tip, fixed in
+    the laboratory far from it); relative to it the nodes move along the normal by
+
+        eta = A^{-1} dt [(u - w U e_r) . N],   A = I + dt diag(v_t) d/ds,
+
+    the backward-Euler form of the kinematic condition in which a displacement is
+    advected by the tangential velocity v_t = (u* - w U* e_r) . t of the surface
+    relative to the nodes (u* a predictor).  Treating this advection explicitly is
+    unstable once U dt exceeds the node spacing on the flanks of the gap, where the
+    surface, static in the laboratory, streams past nodes that move with the neck.
+    """
+
+    Ainv: np.ndarray       # (n, n)
+    w: np.ndarray          # (n,)
+
+
+def kinematics(mer: Meridian, dt: float, ur_star: np.ndarray, uz_star: np.ndarray) -> Kinematics:
+    (tX, tz), _, _, _, _ = mer.node_frame()
+    w = translation_weight(mer)
+    vt = ur_star * tX + uz_star * tz - w * ur_star[0] * tX
+    A = np.eye(mer.n + 1) + dt * vt[:, None] * mer.arclength_derivative()
+    return Kinematics(Ainv=np.linalg.inv(A), w=w)
+
+
+def curvature_response(mer: Meridian, kin: Kinematics | None = None) -> np.ndarray:
     """d kappa / d(dt u) at the nodes, (n, 2n) in the columns (u_r, u_z) of the free surface.
 
-    The shape change of a step is the laboratory normal displacement dt (u . N).  Near
-    the neck it is dominated by the translation U dt N_r of the tip with the neck
-    (U = u_r at P), which can exceed the tip radius many times over; its exact effect
-    is only the change -N_r U dt / r^2 of k2.  The translation is therefore taken out
-    of the Jacobian within the weight w (1 near the neck, 0 well away from it):
+    Near the neck the laboratory displacement of a step is dominated by the translation
+    U dt N_r of the tip with the neck (U = u_r at P), which can exceed the tip radius
+    many times over; its exact effect is only the change -N_r U dt / r^2 of k2.  The
+    curvature is therefore linearised about the reference curve translated by w U dt
+    (see Kinematics):
 
-        d kappa = J (N . u) dt - w [J N_r + N_r / r^2] U dt,
+        d kappa = J eta + T U dt,   eta = A^{-1} dt [N . u - w N_r U],
+        T = -w N_r / r^2 + J (w N_r) - w (J N_r),
 
-    so that the linearisation acts only on the deformation relative to the moving tip
-    and does not depend on how accurately J represents a translation there.
+    where T is the curvature change of the reference translation (exact where w = 1,
+    linear in the transition).  The Jacobian thus acts only on the deformation relative
+    to the moving tip and never on the translation itself.
     """
+    n = mer.n + 1
     (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
     J = mer.curvature_jacobian()
-    w = translation_weight(mer)
-    R = J @ np.hstack([np.diag(Nr), np.diag(Nz)])
+    w = translation_weight(mer) if kin is None else kin.w
+    Ainv = np.eye(n) if kin is None else kin.Ainv
     r = mer.r
     with np.errstate(divide="ignore", invalid="ignore"):
-        exact = np.where(w > 0.0, Nr / np.where(r > 0.0, r * r, 1.0), 0.0)
-    R[:, 0] -= w * (J @ Nr) + w * exact
+        k2_shift = np.where(w > 0.0, Nr / np.where(r > 0.0, r * r, 1.0), 0.0)
+    M = np.hstack([np.diag(Nr), np.diag(Nz)])                  # N . u
+    M[:, 0] -= w * Nr                                          # - w N_r U
+    R = J @ Ainv @ M
+    R[:, 0] += -w * k2_shift + J @ (w * Nr) - w * (J @ Nr)
     return R
 
 
@@ -72,7 +108,7 @@ def operators(mer: Meridian, assembler_kwargs=None, disc_kwargs=None) -> Operato
 
 
 def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operators | None = None,
-                   disc_kwargs=None, full: bool = False):
+                   disc_kwargs=None, full: bool = False, kin: Kinematics | None = None):
     """Free-surface nodal velocity (u_r, u_z) of the linearly implicit step of size dt.
 
     With full=True also returns the disc radial velocity (nodes 1..M) and the disc
@@ -85,7 +121,7 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operato
     (_, _), (Nr, Nz), k1, k2, _ = mer.node_frame()
     kappa = k1 + k2
     G0 = -np.concatenate([kappa * Nr, kappa * Nz])
-    D = -np.vstack([np.diag(Nr), np.diag(Nz)]) @ curvature_response(mer)   # (2n, 2n)
+    D = -np.vstack([np.diag(Nr), np.diag(Nz)]) @ curvature_response(mer, kin)   # (2n, 2n)
     k8 = 8.0 * math.pi
     sf_f = np.concatenate([np.arange(n), nf + np.arange(n)])     # free-surface traction columns
     sf_u = np.concatenate([np.arange(n), nu + np.arange(n)])     # free-surface velocity columns
@@ -107,33 +143,43 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operato
     return ur, uz
 
 
-def advance(mer: Meridian, dt: float, ur: np.ndarray, uz: np.ndarray) -> Meridian:
-    """Move the nodes with the frame-relative normal velocity (no resampling)."""
+def advance(mer: Meridian, dt: float, ur: np.ndarray, uz: np.ndarray, kin: Kinematics) -> Meridian:
+    """Move the nodes: reference translation w U dt e_r plus the normal displacement eta.
+
+    In the neck-anchored frame (which moves by U dt) this is X -> X - (1 - w) U dt +
+    eta N_r, z -> z + eta N_z: nodes near the neck move with it, nodes far from it stay
+    in the laboratory.  No resampling.
+    """
     (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
     U = float(ur[0])
-    # Normal displacement relative to the neck frame; the frame itself moves by U dt.
-    # This equals the laboratory normal motion plus a tangential slip U dt t_r t.
-    wn = ur * Nr + uz * Nz - U * Nr
-    X = mer.X + dt * wn * Nr
-    z = mer.z + dt * wn * Nz
+    eta = kin.Ainv @ (dt * (ur * Nr + uz * Nz - kin.w * U * Nr))
+    X = mer.X - (1.0 - kin.w) * U * dt + eta * Nr
+    z = mer.z + eta * Nz
     X[0], z[0] = 0.0, 0.0
     return Meridian(R_n=mer.R_n + dt * U, X=X, z=z)
 
 
+def _stage(mer: Meridian, dt: float, ops: Operators, predictor) -> Meridian:
+    kin = kinematics(mer, dt, *predictor)
+    ur, uz = solve_velocity(mer, dt, ops=ops, kin=kin)
+    return advance(mer, dt, ur, uz, kin)
+
+
 def step_extrapolated(mer: Meridian, dt: float, assembler_kwargs=None, disc_kwargs=None):
-    """Second-order, L-stable step: 2 x(two half steps) - x(one full step).
+    """Second-order step: 2 x(two half steps) - x(one full step).
 
     Both paths move the same nodes (no resampling inside the step), so the two
     surfaces are combined node by node; the full step reuses the operators of the
-    first half step.  Returns the unresampled meridian and the mean neck speed.
+    first half step.  Each stage uses the explicit velocity at its starting geometry
+    as the predictor of the kinematics.  Returns the unresampled meridian and the mean
+    neck speed.
     """
     ops0 = operators(mer, assembler_kwargs, disc_kwargs)
-    ur, uz = solve_velocity(mer, 0.5 * dt, ops=ops0)
-    half = advance(mer, 0.5 * dt, ur, uz)
-    ur2, uz2 = solve_velocity(half, 0.5 * dt, assembler_kwargs, disc_kwargs=disc_kwargs)
-    hh = advance(half, 0.5 * dt, ur2, uz2)
-    urf, uzf = solve_velocity(mer, dt, ops=ops0)
-    full = advance(mer, dt, urf, uzf)
+    pred0 = solve_velocity(mer, 0.0, ops=ops0)
+    half = _stage(mer, 0.5 * dt, ops0, pred0)
+    ops1 = operators(half, assembler_kwargs, disc_kwargs)
+    hh = _stage(half, 0.5 * dt, ops1, solve_velocity(half, 0.0, ops=ops1))
+    full = _stage(mer, dt, ops0, pred0)
     X = 2.0 * hh.X - full.X
     z = 2.0 * hh.z - full.z
     X[0], z[0] = 0.0, 0.0
