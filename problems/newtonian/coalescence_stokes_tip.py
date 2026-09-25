@@ -741,12 +741,25 @@ class MappedTipMesh(GmshTemplate):
         # at R0=1e-6 but not at R0>=1e-4.  Refining h on the interface lowers that amplitude.
         ks = pb.interface_grading if 0.0 < pb.interface_grading < k else k
 
+        # Zone grading: a finer grading kz between zone_inner and zone_outer neck radii from the
+        # tip (mapped distances d1p, d2p), relaxing linearly to k outside.  The R0=1e-6 startup
+        # transient needs the neck-scale flow resolved more finely than the far field.
+        kz = pb.zone_grading if 0.0 < pb.zone_grading < k else 0.0
+        d1p = self._g(pb.zone_inner * r_neck_phys / S) if kz else 0.0
+        d2p = self._g(pb.zone_outer * r_neck_phys / S) if kz else 0.0
+
+        def zone_size(dp):
+            return kz * dp + (k - kz) * (max(0.0, d1p - dp) + max(0.0, dp - d2p))
+
         def size_mapped(p, on_interface=False):
             dp = max(math.hypot(p[0] - T, p[1]), 1e-3 * h_tip_p)   # clamp: negative powers
             cap = h_max * (dp / L) ** expo
             if b != a:
                 cap = min(cap, h_max * A * (dp / A) ** expo_o)
-            return min(cap, max(h_tip_p, (ks if on_interface else k) * dp))
+            graded = (ks if on_interface else k) * dp
+            if kz:
+                graded = min(graded, zone_size(dp))
+            return min(cap, max(h_tip_p, graded))
 
         f_ctrl = pb.tip_map_control_fraction
         t_geo = time.time()
@@ -810,6 +823,9 @@ class MappedTipMesh(GmshTemplate):
             dist_iface = self.add_mesh_size_field("Distance", PointsList=[p_n, *inner, p_t])
             size_expr = (f"min({size_expr}, max({h_tip_p!r}, {ks!r}*F{dist})"
                          f" + {pb.interface_size_growth!r}*F{dist_iface})")
+        if kz:
+            zone_expr = (f"{kz!r}*F{dist} + {k - kz!r}*(max(0,{d1p!r}-F{dist}) + max(0,F{dist}-{d2p!r}))")
+            size_expr = f"min({size_expr}, max({h_tip_p!r}, {zone_expr}))"
         refinement_receipt = []
         for x, z, clearance_ratio in shallow_targets:
             centre = self._fwd(x / S, z / S)
@@ -836,6 +852,7 @@ class MappedTipMesh(GmshTemplate):
             "apex_arc": dict(getattr(pb, "_apex_arc", {})),
             "shallow_interface_refinement": refinement_receipt,
             "interface_grading": ks,
+            "zone_grading": [kz, pb.zone_inner, pb.zone_outer] if kz else None,
         }
 
 class StokesTipCoalescence(Problem):
@@ -894,6 +911,9 @@ class StokesTipCoalescence(Problem):
         interface_grading: float = 0.0,
         interface_size_growth: float = 0.3,
         restart: dict[str, Any] | None = None,
+        zone_grading: float = 0.0,
+        zone_inner: float = 1e-3,
+        zone_outer: float = 2.0,
     ):
         super().__init__()
         self.R0 = float(R0)
@@ -984,6 +1004,12 @@ class StokesTipCoalescence(Problem):
         # size grows away from the interface at interface_size_growth per unit mapped distance.
         self.interface_grading = float(interface_grading)
         self.interface_size_growth = float(interface_size_growth)
+        # Zone grading between zone_inner and zone_outer neck radii from the tip; 0 = off.
+        self.zone_grading = float(zone_grading)
+        self.zone_inner = float(zone_inner)
+        self.zone_outer = float(zone_outer)
+        if self.zone_grading < 0 or not 0 < self.zone_inner < self.zone_outer:
+            raise ValueError("zone_grading must be >= 0 and 0 < zone_inner < zone_outer")
         if self.interface_grading < 0 or self.interface_size_growth <= 0:
             raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
