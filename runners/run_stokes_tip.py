@@ -59,6 +59,7 @@ def main() -> int:
     ap.add_argument("--zone-grading", type=float, default=0.0, help="finer grading between --zone-inner and --zone-outer neck radii from the tip (0 = off)")
     ap.add_argument("--zone-inner", type=float, default=1e-3)
     ap.add_argument("--zone-outer", type=float, default=2.0)
+    ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -138,6 +139,7 @@ def main() -> int:
         interface_size_growth=args.interface_size_growth,
         restart=restart,
         zone_grading=args.zone_grading,
+        tip_apex_zone=args.tip_apex_zone,
         zone_inner=args.zone_inner,
         zone_outer=args.zone_outer,
     )
