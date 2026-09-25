@@ -43,10 +43,15 @@ def main() -> int:
                     dt_fraction=a.dt_fraction, curvature_target=a.curvature_target, R_stop=a.r_stop,
                     max_steps=a.max_steps, max_wall_s=a.max_wall_s)
     a.out.mkdir(parents=True, exist_ok=True)
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
+    commit_file = ROOT / "COMMIT"
+    if commit_file.is_file():                      # source materialised from an archive
+        commit = commit_file.read_text().strip()
+    else:
+        try:
+            commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
+                                             stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            commit = "unknown"
     manifest = {"case_file": str(a.case), "case_sha256": hashlib.sha256(a.case.read_bytes()).hexdigest(),
                 "case_id": case["case_id"], "solver": "independent.bim_stokes", "component_commit": commit,
                 "config": asdict(cfg), "argv": sys.argv}
