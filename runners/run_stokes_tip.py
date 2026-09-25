@@ -56,6 +56,9 @@ def main() -> int:
     ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target relative change of the neck curvature per step")
     ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
     ap.add_argument("--restart-from", type=Path, default=None, help="restart/remesh_NNNN.npz written by an earlier moving-frame run")
+    ap.add_argument("--zone-grading", type=float, default=0.0, help="finer grading between --zone-inner and --zone-outer neck radii from the tip (0 = off)")
+    ap.add_argument("--zone-inner", type=float, default=1e-3)
+    ap.add_argument("--zone-outer", type=float, default=2.0)
     args = ap.parse_args()
 
     case = json.loads(args.case.read_text())
@@ -134,6 +137,9 @@ def main() -> int:
         tip_shrink_remesh=args.tip_shrink_remesh,
         interface_size_growth=args.interface_size_growth,
         restart=restart,
+        zone_grading=args.zone_grading,
+        zone_inner=args.zone_inner,
+        zone_outer=args.zone_outer,
     )
     pb.quiet()
     if args.seed_frozen_stokes:
