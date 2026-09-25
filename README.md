@@ -41,5 +41,9 @@ quadrant of one drop. The pyoomph version is pinned in `pyproject.toml` and
 
 ## Status
 
-Newtonian problem class and Anthony 2020 case matrix are in place. Results are
-not stored in this repository.
+The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 is reproduced
+from their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03; see
+[`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
+finite-Ohnesorge branch and the non-Newtonian problems are not yet computed.
+Simulation output is not stored in this repository; the documentation carries
+only derived figures.
