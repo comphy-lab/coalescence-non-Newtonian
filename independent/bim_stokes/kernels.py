@@ -34,7 +34,7 @@ import numpy as np
 from scipy.special import ellipe, ellipkm1
 
 K2_SPLIT = 0.05
-N_PHI_SMOOTH = 64
+N_PHI_SMOOTH = 12
 
 
 def _delta_integrals(m1):
