@@ -1,0 +1,105 @@
+{
+  "schema": "pyoomph-case-v1",
+  "case_id": "T5-stokes-R0-1.78e-06",
+  "geometry": {
+    "kind": "axisymmetric",
+    "coordinates": [
+      "r",
+      "z"
+    ],
+    "frame": "laboratory",
+    "domain": "one quadrant of one drop: axis r=0, symmetry plane z=0, free surface S(t)"
+  },
+  "nondimensionalization": {
+    "length": "R_drop",
+    "time": "mu*R_drop/gamma  (viscocapillary, t_VC; density does not enter)",
+    "pressure": "gamma/R_drop",
+    "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
+  },
+  "physics": {
+    "problem": "newtonian-drop-coalescence-free-surface",
+    "constitutive": "Newtonian",
+    "exterior": {
+      "kind": "passive",
+      "density": 0.0,
+      "viscosity": 0.0,
+      "pressure": "constant datum"
+    },
+    "inertia": false,
+    "Oh": null,
+    "inverse_Oh": 0.0,
+    "initial_bridge": {
+      "R0": 1.778279410038923e-06,
+      "Z0": 1.58113883008419e-12,
+      "surface": "[r-(R0+Z0)]^2 + z^2 = Z0^2  (Eq. 2)",
+      "approximate_point_contact": true
+    },
+    "initial_velocity": "quiescent"
+  },
+  "tolerances": {
+    "newton": 5e-08,
+    "time_adaptive_target": 1e-06,
+    "max_newton_iterations": 20,
+    "minimum_dt": 1e-18
+  },
+  "mesh": {
+    "characteristic_size": 0.05,
+    "cap_resolution": 8,
+    "bridge_normal_resolution": 8,
+    "resolution_role": "reconstructed controlled-Q2 pilot; repeat at 4, 8 and 16 for convergence because Anthony et al. do not publish their element counts",
+    "remeshing": true,
+    "remesh_factor": 4.0,
+    "remesh_gates": {
+      "relative_volume": 1e-10,
+      "relative_interface_normal": 0.005,
+      "relative_interface_tangential": 0.005,
+      "relative_neck": 0.005,
+      "relative_pole": 0.005,
+      "absolute_divergence": 1e-09,
+      "absolute_divergence_correction": 1e-09,
+      "absolute_flux_change": 1e-09,
+      "relative_flux_change": 1e-10,
+      "calibration_relative_divergence_growth": 0.25,
+      "calibration_relative_divergence_correction": 0.25,
+      "calibration_relative_flux_change": 0.25
+    },
+    "remesh_rule": "remesh whenever R_min has grown by a factor of 4 (Anthony 2020, Sec. II.B.2)",
+    "bridge_region": "ellipse of Eq. 6: z1=R_min (R_min<1/2), r2=2*R_min, slope tan(pi/3) at axis, 0 at plane; lagged one step",
+    "smallest_scale_to_resolve": "curvature radius ~ R_min^3"
+  },
+  "run": {
+    "max_time": 1.0,
+    "startstep": 3e-15,
+    "maxstep": 5e-08,
+    "linear_solver": "superlu",
+    "remesh_max_trigger_ratio": 4.05
+  },
+  "output": {
+    "write_states": true,
+    "diagnostics": [
+      "R_min(t)",
+      "Z_b = z(r=1.05 R_min)",
+      "u_min = u(r=R_min)",
+      "|2H| at neck",
+      "interface profile",
+      "V_bod (back-of-drop axial velocity)",
+      "t_con by power-law extrapolation"
+    ],
+    "cadence": 0.05,
+    "cadence_unit": "decades of R_min (log10) between diagnostic records; states also written at every remesh",
+    "cadence_rule": "every remesh and every decade of R_min"
+  },
+  "completion": {
+    "kind": "event",
+    "value": "R_min >= 0.03",
+    "observable": "R_min",
+    "operator": ">=",
+    "threshold": 0.03,
+    "note": "Fig. 3 validation endpoint: Eggers' Stokes prediction quoted by Anthony et al. is valid for R_min < 0.03; max_time is the independent safety endpoint"
+  },
+  "provenance": {
+    "tier": "T5",
+    "reproduces": "Stokes startup family between R0=1e-6 and 1e-4 (logarithmically spaced initial neck radii)",
+    "note": "Exact Anthony-type initial bridge: Z0=R0^2/2=1.581139e-12. Mesh counts are reconstructed and require convergence."
+  }
+}
