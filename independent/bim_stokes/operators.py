@@ -139,6 +139,7 @@ class Operators:
     C: np.ndarray        # (2 n_row, 2 n_u)   free term
     mer: Meridian
     disc: Disc
+    cap: np.ndarray | None = None   # (2 n_row,) single layer of -kappa N, curvature from the spline
 
     @property
     def N(self) -> int:
@@ -203,6 +204,8 @@ class Assembler:
         nr, nu, nf = self.n_row, self.n_u, self.n_f
         K = np.zeros((2, nr, 2, nu))
         S = np.zeros((2, nr, 2, nf))
+        cap = np.zeros((2, nr))
+        self._cap = cap
         xg, wg = _gauss(self.order_far)
         for pc in (self.free, self.disc):
             a, b, L = pc.a, pc.b, pc.L
@@ -212,6 +215,8 @@ class Assembler:
             Bq = np.stack([pc.basis(j, sq[j]) for j in range(pc.n_pan)])
             near = self._near_pairs(pc, Xq, zq)
             rq = Xq + self.m.R_n
+            if pc is self.free:
+                fq = self._capillary(sq)                                     # (2, N, q)
             for i0 in range(0, nr, self.chunk):
                 I = np.arange(i0, min(nr, i0 + self.chunk))
                 dr = Xq[None] - self.tX[I, None, None]
@@ -219,12 +224,30 @@ class Assembler:
                 Mk, Qk = ring_kernels(self.tr[I, None, None], rq[None], dr, dz, Nrq[None], Nzq[None])
                 w = (wq * spq)[None] * (~near[I]).astype(float)[..., None]
                 self._scatter(K, S, I, Mk, Qk, w, Bq, pc)
+                if pc is self.free:
+                    for alpha in range(2):
+                        cap[alpha, I] += np.einsum("bijq,bjq->i", Mk[alpha] * w[None], fq)
             self._near_contributions(K, S, pc, near)
         K = K.reshape(2 * nr, 2 * nu)
         S = S.reshape(2 * nr, 2 * nf)
-        ops = Operators(K=K, S=S, C=np.zeros((2 * nr, 2 * nu)), mer=self.m, disc=self.d)
+        ops = Operators(K=K, S=S, C=np.zeros((2 * nr, 2 * nu)), mer=self.m, disc=self.d,
+                        cap=cap.reshape(2 * nr))
         ops.C = self._free_term(ops)
         return ops
+
+    def _capillary(self, sigma):
+        """Capillary traction -kappa N at parameters sigma, from the spline itself.
+
+        Integrating this (rather than the cubic interpolant of nodal values)
+        keeps the net axial force exact: kappa N r = e_r - d(r t)/ds for any
+        smooth meridian, so its integral telescopes to 2 pi R_n.  The drop
+        approach velocity is resisted only by the neck, so it amplifies a
+        net-force error by ~1/R_n; with interpolated nodal traction the error
+        is O(h_max^4) and dominated the neck dynamics at R0 = 1e-6.
+        """
+        (_, _), (Nr, Nz), k1, k2, _ = self.m.frame(sigma)
+        kappa = k1 + k2
+        return np.stack([-kappa * Nr, -kappa * Nz])
 
     def _scatter(self, K, S, I, Mk, Qk, w, Bq, pc):
         nI = len(I)
@@ -269,7 +292,7 @@ class Assembler:
 
     def _near_contributions(self, K, S, pc: _Piece, near) -> None:
         mer = self.m
-        rows, B_l, cu_l, cf_l, sg_l, w_l = [], [], [], [], [], []
+        rows, B_l, cu_l, cf_l, sg_l, w_l, sig_l = [], [], [], [], [], [], []
         r0_l, r_l, dX_l, dz_l, Nr_l, Nz_l, c0_l = [], [], [], [], [], [], []
         for i, j in zip(*np.nonzero(near)):
             a, b = pc.a[j], pc.b[j]
@@ -296,6 +319,7 @@ class Assembler:
                 c0 = Nr * dX + Nz * dz
             m = sigma.size
             rows.append(np.full(m, i))
+            sig_l.append(sigma)
             B_l.append(pc.basis(j, sigma))
             cu_l.append(np.broadcast_to(pc.u_dof[pc.st_idx[j]], (m, 4)))
             cf_l.append(np.broadcast_to(pc.f_dof[pc.st_idx[j]], (m, 4)))
@@ -309,6 +333,10 @@ class Assembler:
         cat = np.concatenate
         rows, B, cu, cf, sg, w = cat(rows), cat(B_l), cat(cu_l), cat(cf_l), cat(sg_l), cat(w_l)
         Mk, Qk = ring_kernels(cat(r0_l), cat(r_l), cat(dX_l), cat(dz_l), cat(Nr_l), cat(Nz_l), c0=cat(c0_l))
+        if pc is self.free:
+            fq = self._capillary(cat(sig_l))
+            for alpha in range(2):
+                np.add.at(self._cap[alpha], rows, np.einsum("bq,bq->q", Mk[alpha], fq) * w)
         flat_rows = np.repeat(rows, 4)
         for beta in range(2):
             for alpha in range(2):
