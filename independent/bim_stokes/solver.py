@@ -53,7 +53,7 @@ class Kinematics:
 
     the backward-Euler form of the kinematic condition in which a displacement is
     advected by the tangential velocity v_t = (u* - w U* e_r) . t of the surface
-    relative to the nodes (u* a predictor).  Treating this advection explicitly is
+    relative to the nodes (u* a predictor), with a second-order upwind d/ds.  Treating this advection explicitly is
     unstable once U dt exceeds the node spacing on the flanks of the gap, where the
     surface, static in the laboratory, streams past nodes that move with the neck.
     """
@@ -62,12 +62,43 @@ class Kinematics:
     w: np.ndarray          # (n,)
 
 
+def upwind_derivative(mer: Meridian, v: np.ndarray) -> np.ndarray:
+    """Second-order upwind d/ds at the nodes for a scalar even at the neck and the pole.
+
+    One-sided three-point formula on the side the advection velocity v comes
+    from.  A centred (spline) derivative decouples odd and even nodes on the
+    stretched grid: with backward Euler at Courant numbers of order one the
+    kinematic operator then had a sawtooth null vector (condition number
+    ~4e17 on the gap flank at R0 = 1e-6), which injected noise into the tip.
+    """
+    n = mer.n + 1
+    s = mer.sigma
+    g = 2
+    s_ext = np.concatenate([-s[g:0:-1], s, 2.0 * s[-1] - s[-2:-2 - g:-1]])
+    idx = np.concatenate([np.arange(g, 0, -1), np.arange(n), n - 2 - np.arange(g)])   # even ghosts
+    _, _, _, _, speed = mer.frame(s)
+    D = np.zeros((n, n))
+    for i in range(n):
+        k = i + g
+        if v[i] == 0.0:
+            continue
+        j1, j2 = (k - 1, k - 2) if v[i] > 0.0 else (k + 1, k + 2)
+        x0, x1, x2 = s_ext[k], s_ext[j1], s_ext[j2]
+        c0 = (2.0 * x0 - x1 - x2) / ((x0 - x1) * (x0 - x2))       # Lagrange derivative weights at x0
+        c1 = (x0 - x2) / ((x1 - x0) * (x1 - x2))
+        c2 = (x0 - x1) / ((x2 - x0) * (x2 - x1))
+        D[i, idx[k]] += c0
+        D[i, idx[j1]] += c1
+        D[i, idx[j2]] += c2
+    return D / speed[:, None]
+
+
 def kinematics(mer: Meridian, dt: float, ur_star: np.ndarray, uz_star: np.ndarray) -> Kinematics:
     (tX, tz), _, _, _, _ = mer.node_frame()
     w = translation_weight(mer)
     vt = ur_star * tX + uz_star * tz - w * ur_star[0] * tX
-    A = np.eye(mer.n + 1) + dt * vt[:, None] * mer.arclength_derivative()
-    return Kinematics(Ainv=np.linalg.inv(A), w=w)
+    A = np.eye(mer.n + 1) + dt * vt[:, None] * upwind_derivative(mer, vt)
+    return Kinematics(Ainv=np.linalg.solve(A, np.eye(mer.n + 1)), w=w)
 
 
 def curvature_response(mer: Meridian, kin: Kinematics | None = None) -> np.ndarray:
