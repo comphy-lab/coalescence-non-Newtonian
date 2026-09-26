@@ -145,8 +145,8 @@ def main() -> int:
     )
     pb.quiet()
     if args.seed_frozen_stokes:
-        if float(bridge["R0"]) != 1e-6 or not args.neck_frame_moving:
-            raise SystemExit("frozen-Stokes seed is limited to the exact R0=1e-6 moving-frame case")
+        if not args.neck_frame_moving:
+            raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
         from runners.stokes_block_audit import seed_frozen_stokes
         pb.initialise()
         seed_frozen_stokes(pb, args.out, args.dt_initial)
