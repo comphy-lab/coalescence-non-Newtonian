@@ -140,6 +140,8 @@ class Operators:
     mer: Meridian
     disc: Disc
     cap: np.ndarray | None = None   # (2 n_row,) single layer of -kappa N, curvature from the spline
+    disc_force: np.ndarray | None = None   # (M+1,) weights: axial force of the disc = disc_force . f_z(nodes)
+    free_force: np.ndarray | None = None   # (N+1,) weights: axial force of an interpolated nodal free-surface traction
 
     @property
     def N(self) -> int:
@@ -231,9 +233,35 @@ class Assembler:
         K = K.reshape(2 * nr, 2 * nu)
         S = S.reshape(2 * nr, 2 * nf)
         ops = Operators(K=K, S=S, C=np.zeros((2 * nr, 2 * nu)), mer=self.m, disc=self.d,
-                        cap=cap.reshape(2 * nr))
+                        cap=cap.reshape(2 * nr), disc_force=self._disc_force_weights(),
+                        free_force=self._free_force_weights())
         ops.C = self._free_term(ops)
         return ops
+
+    def _disc_force_weights(self):
+        """Weights w with 2 pi int_D f_z r dr = w . f_z(disc nodes), same interpolation as the operators."""
+        pc = self.disc
+        xg, wg = _gauss(self.order_far)
+        w = np.zeros(self.M + 1)
+        for j in range(pc.n_pan):
+            sq = 0.5 * pc.L[j] * xg + 0.5 * (pc.a[j] + pc.b[j])
+            B = pc.basis(j, sq)                                        # (q, 4)
+            r = self.m.R_n - sq
+            contrib = (0.5 * pc.L[j] * wg * r) @ B * pc.st_sgn[j][:, 1]
+            np.add.at(w, pc.st_idx[j], contrib)
+        return 2.0 * math.pi * w
+
+    def _free_force_weights(self):
+        """Weights w with 2 pi int_Sf f_z r dl = w . f_z(free-surface nodes), operators' interpolation."""
+        pc = self.free
+        xg, wg = _gauss(self.order_far)
+        w = np.zeros(self.N + 1)
+        for j in range(pc.n_pan):
+            sq = 0.5 * pc.L[j] * xg + 0.5 * (pc.a[j] + pc.b[j])
+            Xq, _, _, _, sp = pc.geom(sq)
+            contrib = (0.5 * pc.L[j] * wg * sp * (Xq + self.m.R_n)) @ pc.basis(j, sq) * pc.st_sgn[j][:, 1]
+            np.add.at(w, pc.st_idx[j], contrib)
+        return 2.0 * math.pi * w
 
     def _capillary(self, sigma):
         """Capillary traction -kappa N at parameters sigma, from the spline itself.
