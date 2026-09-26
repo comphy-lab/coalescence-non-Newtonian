@@ -254,6 +254,8 @@ class RunConfig:
     max_wall_s: float = 1e9
     restart_every: int = 25
     assembler: dict = field(default_factory=dict)
+    newton: bool = False          # backward Euler solved by Newton-Krylov instead of the extrapolated linearly implicit step
+    newton_tol: float = 1e-3      # residual, in units of the local node spacing
 
 
 def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | None = None,
@@ -278,8 +280,15 @@ def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | 
         if step - steps0 >= cfg.max_steps or time.time() - wall0 > cfg.max_wall_s:
             status = "limit"
             break
-        moved, U = step_extrapolated(mer, dt, cfg.assembler,
-                                     dict(k=cfg.k, n_tip=cfg.n_tip, h_max=cfg.h_max))
+        dk = dict(k=cfg.k, n_tip=cfg.n_tip, h_max=cfg.h_max)
+        if cfg.newton:
+            from .newton import step_backward_euler
+            moved, U, rep = step_backward_euler(mer, dt, dk, cfg.assembler, tol=cfg.newton_tol)
+            if not rep.converged:
+                status = "newton_failure"
+                break
+        else:
+            moved, U = step_extrapolated(mer, dt, cfg.assembler, dk)
         mer = resample(moved, cfg.k, cfg.n_tip, cfg.h_max)
         t += dt
         step += 1
