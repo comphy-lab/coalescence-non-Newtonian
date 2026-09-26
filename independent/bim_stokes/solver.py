@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from scipy.linalg import lu_factor, lu_solve
 
 from .geometry import Meridian, disc_for, target_spacing
 from .operators import Assembler, Operators
@@ -165,7 +166,26 @@ def solve_velocity(mer: Meridian, dt: float, assembler_kwargs=None, ops: Operato
     u_cols = np.array([c for c in range(2 * nu) if c not in fixed])
     rows = np.array([r for r in range(2 * nr) if r not in (N, N + M)])  # trivial r-rows on the axis
     A = np.hstack([Au[np.ix_(rows, u_cols)], Af[rows]])
-    x = np.linalg.solve(A, rhs[rows])
+    lu = lu_factor(A)
+    x = lu_solve(lu, rhs[rows])
+    if ops.disc_force is not None:
+        # Exact global force balance: the disc must carry the net force of the free-surface
+        # traction (the capillary part is exactly -2 pi R_n).  The drop approach
+        # velocity is resisted only by the neck, so a force error of relative size 1e-9 on the
+        # unit drop is an O(1) error in it at R0 = 1e-6; the minimum-residual correction
+        # d = (A^T A)^{-1} c lies along that weakly resisted mode.
+        # The balance is imposed on the traction the system actually uses: exact capillary part
+        # (-2 pi R_n) plus the net force of the implicit traction increment dt D u, integrated
+        # with the operators' interpolation, so that a well-resolved problem is left unchanged.
+        c = np.zeros(x.size)
+        c[u_cols.size:] = ops.disc_force
+        if dt != 0.0 and ops.free_force is not None:
+            g = np.zeros(2 * nu)
+            g[sf_u] = dt * (ops.free_force @ D[n:, :])
+            c[:u_cols.size] += g[u_cols]
+        F = 2.0 * math.pi * mer.R_n
+        d = lu_solve(lu, lu_solve(lu, c, trans=1))
+        x = x + d * (F - c @ x) / (c @ d)
     U = np.zeros(2 * nu)
     U[u_cols] = x[:u_cols.size]
     ur, uz = U[:n], U[nu:nu + n]
