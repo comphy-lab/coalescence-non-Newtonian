@@ -17,14 +17,14 @@ the computed curve.
 contact, so it is compared only where a computation has forgotten its initial bridge
 (beyond a few R0, see `verificationCases/fem-startup-r0-independence/`) and only for
 R_min ≤ 0.03. The leading order fixes the coefficient 1/π of the logarithm but not an
-additive constant: u_v = (1/π) ln(C/R_min) with C undetermined at that order. The
-comparison is therefore made on the compensated velocity u_v + (1/π) ln R_min, which is
-constant for such a law: its flatness tests the slope, its level gives C. C is fitted to
-the smallest-R0 run over 10 R0 ≤ R_min ≤ 0.03 with the slope held at 1/π; a free-slope
-fit is reported alongside.
+additive constant: u_v = (1/π) ln(C/R_min) with C undetermined at that order. C is
+fitted to the smallest-R0 run over 10 R0 ≤ R_min ≤ 0.03 with the slope held at 1/π (a
+free-slope fit is reported alongside), and the data are divided by the fitted law: a
+trajectory that follows it lies on 1, so flatness tests the slope and departures show
+where the law does not hold (the startup transient; finite size beyond 0.03).
 
 **Runs.** The finite-element runs of
 [`../../verificationCases/fem-startup-r0-independence/runs.toml`](../../verificationCases/fem-startup-r0-independence/runs.toml).
 
 **Reproduce.** `postProcess/plot_startup_family.py`: both forms against R_min in panel (a),
-the compensated velocity and the fit in panel (b); the fit is written to the `.json`.
+the ratio to the fitted law in panel (b); the fit is written to the `.json`.

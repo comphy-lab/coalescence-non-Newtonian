@@ -4,10 +4,10 @@
 (a) u_v(R_min) for every run in the run list, with the digitised Stokes markers of
 Anthony, Harris & Basaran (2020, Fig. 3b) and the two leading-order forms of the
 Eggers, Lister & Stone (1999) law (``coalescence.analysis.theory``); (b) the same data
-compensated by the leading-order law, u_v + (1/pi) ln R_min, which is constant for
-u_v = (1/pi) ln(C/R_min): the leading-order theory fixes the slope 1/pi but not C, which
-is fitted to the smallest-R0 run over --fit-from R0 <= R_min <= 0.03 (slope held at
-1/pi; a free-slope fit is also reported); (c) the deviation of each run from the
+divided by the leading-order law u_v = (1/pi) ln(C/R_min), whose coefficient 1/pi is
+fixed by the theory and whose constant C is not: C is fitted to the smallest-R0 run over
+--fit-from R0 <= R_min <= 0.03 with the slope held at 1/pi (a free-slope fit is also
+reported), so a trajectory that follows the law lies on 1; (c) the deviation of each run from the
 smallest-R0 run at equal R_min, against R_min/R0. Every run must have reached R_stop.
 No velocity offset or time shift is fitted in (a) or (c).
 
@@ -86,34 +86,40 @@ def main() -> None:
     metrics = {"run_list": str(a.runs), "reference": ref_run.id, "runs": {},
                "theory": {"leading_log": "u_v = -(1/pi) ln R_min",
                           "eggers": "u_v = -(1 + ln tau_v)/pi, R_min = -(tau_v/pi) ln tau_v"}}
+    # Leading-order law with its undetermined constant fitted, slope held at 1/pi.
+    lo, hi = a.fit_from * ref_run.R0, R_MAX_STOKES
+    win = (ref["R_min"] >= lo) & (ref["R_min"] <= hi)
+    shift = ref["u_neck"][win] - u_leading_log(ref["R_min"][win])
+    intercept = float(np.mean(shift))
+    C = float(np.exp(np.pi * intercept))
+    slope_free, intercept_free = np.polyfit(-np.log(ref["R_min"][win]), ref["u_neck"][win], 1)
+
+    def u_fit(R):
+        return u_leading_log(R) + intercept
+
+    ratio_win = ref["u_neck"][win] / u_fit(ref["R_min"][win])
+    metrics["log_law_fit"] = {"law": "u_v = (1/pi) ln(C/R_min)", "window": [lo, hi], "run": ref_run.id,
+                              "C": C, "additive_constant": intercept,
+                              "ratio_rms_minus_1": float(np.sqrt(np.mean((ratio_win - 1.0) ** 2))),
+                              "ratio_max_abs_minus_1": float(np.max(np.abs(ratio_win - 1.0))),
+                              "slope_free": float(slope_free), "intercept_free": float(intercept_free),
+                              "slope_theory": 1.0 / np.pi}
     if a.anthony is not None:
         an = anthony_stokes(a.anthony)
         axes[0].plot(an[:, 0], an[:, 1], "o", ms=3.5, mfc="none", mec="0.45", mew=0.9, zorder=2,
                      label=r"Anthony \textit{et al.} (2020), Stokes")
-        axes[1].plot(an[:, 0], an[:, 1] - u_leading_log(an[:, 0]), "o", ms=3.5, mfc="none", mec="0.45", mew=0.9, zorder=2)
+        axes[1].plot(an[:, 0], an[:, 1] / u_fit(an[:, 0]), "o", ms=3.5, mfc="none", mec="0.45", mew=0.9, zorder=2)
         metrics["anthony_sha256"] = hashlib.sha256(a.anthony.read_bytes()).hexdigest()
     Rt = np.geomspace(ref_run.R0, R_MAX_STOKES, 400)
     axes[0].plot(Rt, u_leading_log(Rt), color="k", lw=1.0, ls=":", zorder=4, label=r"$u_v=-\pi^{-1}\ln R_{\min}$")
     axes[0].plot(Rt, u_eggers(Rt), color="k", lw=1.2, ls="--", zorder=4,
                  label=r"$u_v=\mathrm{d}R_{\min}/\mathrm{d}\tau_v$, $R_{\min}=-\pi^{-1}\tau_v\ln\tau_v$")
-    axes[1].plot(Rt, np.zeros_like(Rt), color="k", lw=1.0, ls=":", zorder=4)
-    axes[1].plot(Rt, u_eggers(Rt) - u_leading_log(Rt), color="k", lw=1.2, ls="--", zorder=4)
-    lo, hi = a.fit_from * ref_run.R0, R_MAX_STOKES
-    win = (ref["R_min"] >= lo) & (ref["R_min"] <= hi)
-    comp = ref["u_neck"][win] - u_leading_log(ref["R_min"][win])
-    intercept = float(np.mean(comp))
-    slope_free, intercept_free = np.polyfit(-np.log(ref["R_min"][win]), ref["u_neck"][win], 1)
-    metrics["log_law_fit"] = {"window": [lo, hi], "run": ref_run.id, "intercept_slope_fixed": intercept,
-                              "C": float(np.exp(np.pi * intercept)),
-                              "rms_slope_fixed": float(np.sqrt(np.mean((comp - intercept) ** 2))),
-                              "slope_free": float(slope_free), "intercept_free": float(intercept_free),
-                              "slope_theory": 1.0 / np.pi}
-    axes[1].plot([lo, hi], [intercept, intercept], color="k", lw=1.5, ls="-.", zorder=6,
-                 label=rf"$u_v=\pi^{{-1}}\ln(C/R_{{\min}})$, $C={np.exp(np.pi * intercept):.2f}$ (fit)")
+    axes[1].plot(Rt, np.ones_like(Rt), color="k", lw=1.2, ls="-.", zorder=4,
+                    label=rf"$u_v=\pi^{{-1}}\ln(C/R_{{\min}})$, $C={C:.2f}$ (fit, slope $1/\pi$)")
     for k, (run, d) in enumerate(zip(runs, series)):
         c, ls = COLOURS[k % len(COLOURS)], STYLES[k % len(STYLES)]
         axes[0].plot(d["R_min"], d["u_neck"], color=c, ls=ls, lw=1.8, zorder=3, label=r0_label(run.R0))
-        axes[1].plot(d["R_min"], d["u_neck"] - u_leading_log(d["R_min"]), color=c, ls=ls, lw=1.8, zorder=3)
+        axes[1].plot(d["R_min"], d["u_neck"] / u_fit(d["R_min"]), color=c, ls=ls, lw=1.8, zorder=3)
         u_pk, R_pk = peak(d["R_min"], d["u_neck"])
         entry = {"R0": run.R0, "u_peak": u_pk, "R_at_peak_over_R0": R_pk / run.R0,
                  "u_at_endpoint": float(interp_log(a.endpoint, d["R_min"], d["u_neck"]))}
@@ -129,8 +135,8 @@ def main() -> None:
             entry.update({"deviation_percent_at_endpoint": float(dev[-1]), "R_over_R0_after_which_within": within})
         metrics["runs"][run.id] = entry
     axes[0].set(xscale="log", xlabel=r"$R_{\min}$", ylabel=r"$u_v$")
-    axes[1].set(xscale="log", xlabel=r"$R_{\min}$", ylabel=r"$u_v+\pi^{-1}\ln R_{\min}$", ylim=(-0.45, 0.95),
-                xlim=axes[0].get_xlim())
+    axes[1].set(xscale="log", xlabel=r"$R_{\min}$", ylabel=r"$u_v\,/\,[\pi^{-1}\ln(C/R_{\min})]$",
+                ylim=(0.86, 1.04), xlim=axes[0].get_xlim())
     axes[2].set(xscale="log", yscale="log", xlabel=r"$R_{\min}/R_0$",
                 ylabel=r"$100\,|u_v/u_v^{\mathrm{ref}}-1|$ [\%]")
     for y in (1.0, 0.1):
