@@ -25,5 +25,5 @@ carry the corresponding uncertainty; they are not raw simulation data.
 [`../../verificationCases/fem-startup-r0-independence/runs.toml`](../../verificationCases/fem-startup-r0-independence/runs.toml);
 the R0 = 10⁻⁶ run is the reproduction.
 
-**Reproduce.** `postProcess/plot_startup_family.py` (panel (a) overlays the markers);
+**Reproduce.** `postProcess/plot_startup_family.py` (panels (a) and (b) overlay the markers);
 see [`docs/la0-stokes-anthony-fig3.md`](../../docs/la0-stokes-anthony-fig3.md).
