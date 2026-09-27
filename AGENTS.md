@@ -30,6 +30,14 @@ Operating notes for the `coalescence-non-Newtonian` repository. Read
 
 ## Repository rules
 
+- Layout: reusable code in `src/coalescence/` (`fem`, `bim`, `analysis`), runners at
+  the root, cases in `simulationCases/`, evidence in `verificationCases/`,
+  `validationCases/` and `modelComparisonCases/` (classified by comparator), figure
+  scripts in `postProcess/`, tests in `testCases/`. Do not add a second cases tree.
+- `coalescence.fem` and `coalescence.bim` never import each other, and `bim` never
+  imports pyoomph; `testCases/test_layout.py` enforces it. They share only case files.
+- Run lists (`runs.toml`) name simulations by identifier, commit and neck-history
+  SHA-256. Machine paths live only in the untracked `data-roots.toml`.
 - pyoomph is pinned in `pyproject.toml` / `uv.lock`. Change the pin only
   through the pinned-environment workflow, never by hand; commit the lockfile
   whenever it changes.

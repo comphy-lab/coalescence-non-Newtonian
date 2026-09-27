@@ -33,7 +33,7 @@ Stokes limit the liquid obeys
 with the free-surface conditions **n**·**σ** = −κ**n** and
 (ẋ_s − **u**)·**n** = 0 on the interface. By symmetry one quadrant of one drop
 is computed (axis r = 0, symmetry plane z = 0). The case file is
-[`cases/anthony2020/T5-stokes-R0-1e-06.json`](../cases/anthony2020/T5-stokes-R0-1e-06.json).
+[`simulationCases/anthony2020/T5-stokes-R0-1e-06.json`](../simulationCases/anthony2020/T5-stokes-R0-1e-06.json).
 
 The computation is multiscale in the extreme: the neck radius starts at
 10⁻⁶, the initial meniscus radius of curvature is Z0 = 5 × 10⁻¹³, and the
@@ -154,7 +154,7 @@ markers, (present/published − 1):
 Runner and arguments used for Figure 1 (pinned environment, one core):
 
 ```bash
-python runners/run_stokes_tip.py cases/anthony2020/T5-stokes-R0-1e-06.json --out <output> \
+python run_fem_stokes_tip.py simulationCases/anthony2020/T5-stokes-R0-1e-06.json --out <output> \
   --h-max 0.02 --dt-initial 1e-15 --tip-map 0.5 --tip-map-outer 0.4 --tip-map-core 1e3 \
   --tip-map-linear-core 1 --min-newton 3 --curvature-step-limit 0.2 --h-tip-floor 1e-30 \
   --spatial-scale 0 --neck-frame --neck-frame-moving --max-residuals 1e13 --seed-frozen-stokes \
