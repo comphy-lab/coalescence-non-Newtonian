@@ -3,7 +3,8 @@
 
 (a) u_v(R_min) in the coordinates of Anthony, Harris & Basaran (2020, Fig. 3b), with
 their digitised Stokes markers and the two leading-order forms of the Eggers, Lister &
-Stone (1999) law; (b) the startup against (R_min - R0)/R0; (c) 100 (BIM/FEM - 1) for
+Stone (1999) law (a function of R_min only, so drawn in (a) only); (b) the startup
+against (R_min - R0)/R0; (c) 100 (BIM/FEM - 1) for
 u_v and for the tip radius. Boundary-integral speeds are assigned to the geometric-mean
 radius of each step (``coalescence.analysis.neck``) and compared at those samples with
 the interpolated finite-element curve. The tip radius of the boundary-integral run is
@@ -68,11 +69,12 @@ def main() -> None:
                label=r"Anthony \textit{et al.} (2020), Stokes")
     for axis, x in ((ax[0], f["R_min"]), (ax[1], f["R_min"] / R0 - 1)):
         axis.plot(x, f["u_neck"], color="#1f4e79", lw=1.8, zorder=3, label=ref_run.label or "finite element")
+    # The theory is a function of R_min alone, for a neck grown from point contact; it is drawn
+    # against R_min only, not against (R_min - R0)/R0, where it would appear as a spurious plateau.
     Rt = R0 * (1 + np.geomspace(1e-9, 40.0, 500))
-    for axis, x in ((ax[0], Rt), (ax[1], Rt / R0 - 1)):
-        axis.plot(x, u_leading_log(Rt), color="k", lw=1.0, ls=":", zorder=5, label=r"$u_v=-\pi^{-1}\ln R_{\min}$")
-        axis.plot(x, u_eggers(Rt), color="k", lw=1.2, ls="--", zorder=5,
-                  label=r"$u_v=\mathrm{d}R_{\min}/\mathrm{d}\tau_v$, $R_{\min}=-\pi^{-1}\tau_v\ln\tau_v$")
+    ax[0].plot(Rt, u_leading_log(Rt), color="k", lw=1.0, ls=":", zorder=5, label=r"$u_v=-\pi^{-1}\ln R_{\min}$")
+    ax[0].plot(Rt, u_eggers(Rt), color="k", lw=1.2, ls="--", zorder=5,
+               label=r"$u_v=\mathrm{d}R_{\min}/\mathrm{d}\tau_v$, $R_{\min}=-\pi^{-1}\tau_v\ln\tau_v$")
     metrics = {"run_list": str(a.runs), "R0": R0, "estimator_factor": a.estimator_factor,
                "anthony_sha256": hashlib.sha256(a.anthony.read_bytes()).hexdigest(), "series": {}}
     R_end = R0
