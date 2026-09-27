@@ -85,3 +85,14 @@ their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03. It a
 with the published curve for R_min ≥ 10⁻⁴ but not during the startup transient; see
 [`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
 finite-Ohnesorge branch and the non-Newtonian problems are not yet computed.
+
+## Archived lines
+
+- `experiment/anthony-fig3-f9b408b` (tag `abandoned/anthony-fig3-f9b408b-2026-09-20`):
+  structured four-block Q2 chart with a lagged Eq. 6 divider constraint on an
+  unreleased pyoomph fork. Closed on 20 September 2026 without an accepted
+  trajectory; retained, locked, as the audit trail for its archived
+  diagnostics. Do not merge into `main`.
+- Tag `archive/structured-mapped-2026-09`: the structured and mapped-Q2
+  finite-element problem classes, runners and tests as they stood on `main`
+  before the move to `src/coalescence/`, superseded by the tip-graded solver.
