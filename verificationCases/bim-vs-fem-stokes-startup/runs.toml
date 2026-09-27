@@ -46,3 +46,15 @@ series = "newton"
 label = "boundary integral, backward Euler (Newton)"
 continues = "bim-s1-r0-1e-6-81b995f"
 
+
+[[run]]
+id = "bim-s1n2-r0-1e-6-e374beb"
+solver = "bim"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "e374beb1194178c23767c3626b6d1af5920b1ea6"
+runtime = "runtime"
+neck_sha256 = "7d32c7895c42067b8a3a4292959bcf1343ef60704662c257e940f20b2a959d95"
+series = "newton"
+label = "boundary integral, backward Euler (Newton)"
+continues = "bim-s1n-r0-1e-6-81b995f"
