@@ -276,6 +276,8 @@ class RunConfig:
     assembler: dict = field(default_factory=dict)
     newton: bool = False          # backward Euler solved by Newton-Krylov instead of the extrapolated linearly implicit step
     newton_tol: float = 1e-3      # residual, in units of the local node spacing
+    newton_stall: float = 0.0     # accept a stalled Newton iteration below newton_stall * newton_tol (0: never)
+    newton_retries: int = 0       # halve dt and retry an unconverged Newton step this many times
 
 
 def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | None = None,
@@ -293,6 +295,7 @@ def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | 
     step = steps0
     status = "running"
     U = 0.0
+    nlog = None
     while True:
         if mer.R_n >= cfg.R_stop:
             status = "reached_R_stop"
@@ -303,7 +306,19 @@ def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | 
         dk = dict(k=cfg.k, n_tip=cfg.n_tip, h_max=cfg.h_max)
         if cfg.newton:
             from .newton import step_backward_euler
-            moved, U, rep = step_backward_euler(mer, dt, dk, cfg.assembler, tol=cfg.newton_tol)
+            for attempt in range(cfg.newton_retries + 1):
+                moved, U, rep = step_backward_euler(mer, dt, dk, cfg.assembler, tol=cfg.newton_tol,
+                                                    stall_factor=cfg.newton_stall)
+                if rep.converged or attempt == cfg.newton_retries:
+                    break
+                dt *= 0.5
+            if nlog is None:
+                nlog = (out / "newton.csv").open("a", encoding="utf-8")
+                if nlog.tell() == 0:
+                    nlog.write("step,dt,converged,stalled,iterations,residual,evaluations,retries\n")
+            nlog.write(f"{step + 1},{dt:.6g},{int(rep.converged)},{int(rep.stalled)},{rep.iterations},"
+                       f"{rep.residuals[-1]:.4g},{rep.evaluations},{attempt}\n")
+            nlog.flush()
             if not rep.converged:
                 status = "newton_failure"
                 break
@@ -325,6 +340,8 @@ def run(mer: Meridian, out: Path, cfg: RunConfig, t0: float = 0.0, dt0: float | 
         factor = min(cfg.dt_growth, max(0.5, math.sqrt(cfg.curvature_target / max(ratio, 1e-12))))
         dt = min(dt_phys, dt * factor)
     log.close()
+    if nlog is not None:
+        nlog.close()
     summary = {"status": status, "steps": step, "t": t, "R_min": mer.R_n, "u_neck": float(U) if step > steps0 else None,
                "volume_drift": (mer.volume() - V0) / V0, "wall_s": time.time() - wall0}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))

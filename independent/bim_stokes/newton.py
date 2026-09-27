@@ -20,6 +20,10 @@ unknowns.  Unknowns and residuals are expressed in units of the local node
 spacing (and of U), so finite-difference perturbations are relative at every
 scale.  GMRES is right-preconditioned by the capillary response (what the
 linearly implicit step captures); it supplies the geometric part.
+
+The finite-difference Jacobian-vector products and the capped Krylov solves set
+a residual floor.  An iteration that stalls (reduces the residual by less than a
+factor 2) below ``stall_factor * tol`` is accepted and reported as stalled.
 """
 
 from __future__ import annotations
@@ -43,6 +47,14 @@ class NewtonReport:
     residuals: list = field(default_factory=list)
     krylov: list = field(default_factory=list)
     evaluations: int = 0
+    stalled: bool = False
+
+
+def stalled(residuals, tol: float, stall_factor: float) -> bool:
+    """True when the last iteration stagnated at a residual floor within stall_factor * tol."""
+    if len(residuals) < 2 or residuals[-1] >= stall_factor * tol:
+        return False
+    return residuals[-1] > 0.5 * residuals[-2]
 
 
 class BackwardEulerStep:
@@ -131,7 +143,7 @@ class BackwardEulerStep:
         return lu_factor(Ps)
 
     # ------------------------------------------------------------------ solve
-    def solve(self, eta0, U0, tol=1e-6, maxit=8, krylov_rtol=1e-3, restart=30, maxkrylov=60):
+    def solve(self, eta0, U0, tol=1e-6, maxit=8, krylov_rtol=1e-3, restart=30, maxkrylov=60, stall_factor=0.0):
         self.Us = max(abs(U0), 1e-3)
         x = self.pack(eta0, U0)
         F, info = self.residual(x)
@@ -178,6 +190,9 @@ class BackwardEulerStep:
             rep.residuals.append(float(np.abs(F).max()))
             if self.verbose:
                 print(f"   newton {it + 1}: |F|_max = {rep.residuals[-1]:.3e} (step {lam:g}, {count[0]} krylov, {self.evaluations} evaluations)", flush=True)
+            if rep.residuals[-1] >= tol and stalled(rep.residuals, tol, stall_factor):
+                rep.converged = rep.stalled = True
+                break
         rep.converged = rep.converged or np.abs(F).max() < tol
         rep.evaluations = self.evaluations
         eta, U = self.unpack(x)
@@ -185,7 +200,7 @@ class BackwardEulerStep:
 
 
 def step_backward_euler(mer: Meridian, dt: float, disc_kwargs: dict, assembler_kwargs=None,
-                        tol: float = 1e-3, maxit: int = 6):
+                        tol: float = 1e-3, maxit: int = 6, stall_factor: float = 0.0):
     """One backward-Euler step solved by Newton-Krylov, from the linearly implicit prediction.
 
     Returns the unresampled new meridian, the new neck speed and the Newton report.
@@ -197,4 +212,4 @@ def step_backward_euler(mer: Meridian, dt: float, disc_kwargs: dict, assembler_k
     (_, _), (Nr, Nz), _, _, _ = mer.node_frame()
     eta0 = kin.Ainv @ (dt * (ur * Nr + uz * Nz - kin.w * ur[0] * Nr))
     be = BackwardEulerStep(mer, dt, disc_kwargs, assembler_kwargs)
-    return be.solve(eta0, float(ur[0]), tol=tol, maxit=maxit)
+    return be.solve(eta0, float(ur[0]), tol=tol, maxit=maxit, stall_factor=stall_factor)

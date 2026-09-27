@@ -13,7 +13,7 @@ import unittest
 
 import numpy as np
 
-from independent.bim_stokes.newton import step_backward_euler
+from independent.bim_stokes.newton import stalled, step_backward_euler
 from independent.bim_stokes.solver import resample
 from tests.test_bim_relaxation import _drop
 
@@ -33,6 +33,14 @@ class NewtonTests(unittest.TestCase):
         rate = -np.polyfit(ts, np.log(amps), 1)[0]
         scheme = math.log(1.0 + 20.0 / 19.0 * dt) / dt
         self.assertAlmostEqual(rate / scheme, 1.0, delta=2e-3)
+
+    def test_stall_acceptance_only_near_tolerance(self) -> None:
+        tol = 1e-3
+        history = [8.5e7, 8.3e4, 10.4, 1.8e-2, 3.0e-3]
+        self.assertTrue(stalled(history + [2.1e-3], tol, 5.0))     # floor just above tol
+        self.assertFalse(stalled(history + [1.4e-3], tol, 5.0))    # still contracting
+        self.assertFalse(stalled([2.0e-2, 1.9e-2], tol, 5.0))      # stalled far above tol
+        self.assertFalse(stalled(history + [2.1e-3], tol, 0.0))    # disabled
 
 
 if __name__ == "__main__":
