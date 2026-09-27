@@ -35,6 +35,9 @@ def main() -> int:
     ap.add_argument("--restart-from", type=Path, default=None)
     ap.add_argument("--newton", action="store_true", help="backward Euler solved by Newton-Krylov (stiff limit)")
     ap.add_argument("--newton-tol", type=float, default=1e-3)
+    ap.add_argument("--newton-stall", type=float, default=0.0,
+                    help="accept a Newton iteration that stalls below this multiple of the tolerance (0: never)")
+    ap.add_argument("--newton-retries", type=int, default=0, help="halve dt and retry an unconverged Newton step")
     a = ap.parse_args()
     case = json.loads(a.case.read_text())
     if case["physics"].get("inertia", True):
@@ -43,7 +46,8 @@ def main() -> int:
     R0, Z0 = float(bridge["R0"]), float(bridge["Z0"])
     cfg = RunConfig(k=a.k, n_tip=a.n_tip, h_max=a.h_max, dt_initial=a.dt_initial or 1e-3 * Z0,
                     dt_fraction=a.dt_fraction, curvature_target=a.curvature_target, R_stop=a.r_stop,
-                    max_steps=a.max_steps, max_wall_s=a.max_wall_s, newton=a.newton, newton_tol=a.newton_tol)
+                    max_steps=a.max_steps, max_wall_s=a.max_wall_s, newton=a.newton, newton_tol=a.newton_tol,
+                    newton_stall=a.newton_stall, newton_retries=a.newton_retries)
     a.out.mkdir(parents=True, exist_ok=True)
     commit_file = ROOT / "COMMIT"
     if commit_file.is_file():                      # source materialised from an archive
