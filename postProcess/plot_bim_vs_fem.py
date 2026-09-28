@@ -86,6 +86,8 @@ def main() -> None:
         ax[1].plot(b["R_step"] / R0 - 1, b["u_neck"], marker=mk, **style)
         Ru, du = relative_deviation(b["R_step"], b["u_neck"], f["R_min"], f["u_neck"])
         Rr, dr = relative_deviation(b["R_min"], b["tip_radius"] / a.estimator_factor, f["R_min"], f["tip_radius"])
+        if du.size == 0 or dr.size == 0:
+            raise SystemExit(f"series {leaf.series!r} has no samples inside the finite-element radius range")
         short = leaf.label.removeprefix("boundary integral, ")
         ax[2].plot(Ru / R0 - 1, du, color=c, lw=1.6, label=rf"$u_v$, {short}")
         ax[2].plot(Rr / R0 - 1, dr, color=c, lw=1.1, ls="--", label=rf"tip radius, {short}")

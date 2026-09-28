@@ -19,6 +19,22 @@ from coalescence.bim.geometry import Meridian, anthony_initial_meridian  # noqa:
 from coalescence.bim.solver import RunConfig, run  # noqa: E402
 
 
+# The case supplies the physics; numerical parameters and the stop radius come from the options.
+CASE_FIELDS_USED = ["physics.inertia", "physics.initial_bridge.R0", "physics.initial_bridge.Z0"]
+
+
+def component_commit() -> str:
+    """HEAD of the component, marked ``-dirty`` when tracked files differ from it."""
+    try:
+        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
+                                         stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                                        text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return "unknown"
+    return commit + ("-dirty" if dirty else "")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("case", type=Path)
@@ -53,14 +69,10 @@ def main() -> int:
     if commit_file.is_file():                      # source materialised from an archive
         commit = commit_file.read_text().strip()
     else:
-        try:
-            commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
-                                             stderr=subprocess.DEVNULL).strip()
-        except Exception:
-            commit = "unknown"
+        commit = component_commit()
     manifest = {"case_file": str(a.case), "case_sha256": hashlib.sha256(a.case.read_bytes()).hexdigest(),
                 "case_id": case["case_id"], "solver": "coalescence.bim", "component_commit": commit,
-                "config": asdict(cfg), "argv": sys.argv}
+                "case_fields_used": CASE_FIELDS_USED, "config": asdict(cfg), "argv": sys.argv}
     t0, dt0, step0 = 0.0, None, 0
     if a.restart_from is not None:
         st = np.load(a.restart_from)
@@ -70,7 +82,10 @@ def main() -> int:
                                     "sha256": hashlib.sha256(a.restart_from.read_bytes()).hexdigest()}
     else:
         mer = anthony_initial_meridian(R0, Z0, k=a.k, n_tip=a.n_tip, h_max=a.h_max)
-    (a.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
+    name = "run-manifest.json"
+    if a.restart_from is not None and (a.out / name).exists():
+        name = f"run-manifest-step{step0:06d}.json"      # keep the record of earlier segments
+    (a.out / name).write_text(json.dumps(manifest, indent=1))
     summary = run(mer, a.out, cfg, t0=t0, dt0=dt0, steps0=step0)
     return 0 if summary["status"] == "reached_R_stop" else 1
 

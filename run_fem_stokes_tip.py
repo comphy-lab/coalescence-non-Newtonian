@@ -15,6 +15,22 @@ sys.path.insert(0, str(ROOT / "src"))
 from coalescence.fem.stokes_tip import StokesTipCoalescence  # noqa: E402
 
 
+# The case supplies the physics; numerical parameters and the stop radius come from the options.
+CASE_FIELDS_USED = ["schema", "physics.inertia", "physics.initial_bridge.R0", "physics.initial_bridge.Z0"]
+
+
+def component_commit() -> str:
+    """HEAD of the component, marked ``-dirty`` when tracked files differ from it."""
+    try:
+        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
+                                         stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                                        text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return "unknown"
+    return commit + ("-dirty" if dirty else "")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("case", type=Path)
@@ -68,11 +84,14 @@ def main() -> int:
     bridge = case["physics"]["initial_bridge"]
     if case["physics"].get("inertia", True):
         raise SystemExit("this runner is for the La=0 Stokes limit only")
+    if args.restart_from is not None and not args.seed_frozen_stokes:
+        raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
+    if args.seed_frozen_stokes and not args.neck_frame_moving:
+        raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
+    if args.audit_blocks and (args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6):
+        raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
     args.out.mkdir(parents=True, exist_ok=True)
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
+    commit = component_commit()
     import pyoomph
 
     manifest = {
@@ -80,12 +99,11 @@ def main() -> int:
         "case_sha256": hashlib.sha256(args.case.read_bytes()).hexdigest(),
         "case_id": case["case_id"],
         "component_commit": commit,
+        "case_fields_used": CASE_FIELDS_USED,
         "pyoomph_module": pyoomph.__file__,
         "argv": sys.argv,
     }
     restart = None
-    if args.restart_from is not None and not args.seed_frozen_stokes:
-        raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
     if args.restart_from is not None:
         import numpy as np
         with np.load(args.restart_from) as data:
@@ -93,7 +111,10 @@ def main() -> int:
         manifest["restart_from"] = {"path": str(args.restart_from),
                                     "sha256": hashlib.sha256(args.restart_from.read_bytes()).hexdigest(),
                                     "t": restart["t"], "R_min": restart["R_min"]}
-    (args.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
+    name = "run-manifest.json"
+    if restart is not None and (args.out / name).exists():
+        name = f"run-manifest-step{int(restart['steps']):06d}.json"   # keep the record of earlier segments
+    (args.out / name).write_text(json.dumps(manifest, indent=1))
     with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
 
@@ -145,14 +166,10 @@ def main() -> int:
     )
     pb.quiet()
     if args.seed_frozen_stokes:
-        if not args.neck_frame_moving:
-            raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
         from stokes_block_audit import seed_frozen_stokes
         pb.initialise()
         seed_frozen_stokes(pb, args.out, args.dt_initial)
     if args.audit_blocks:
-        if args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6:
-            raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
         summary = pb.run_campaign(max_steps=1, max_wall_s=args.max_wall_s)
         if summary["steps"] != 1:
             return 1

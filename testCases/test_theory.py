@@ -15,6 +15,10 @@ class TheoryTests(unittest.TestCase):
         tau = np.exp(np.linspace(-40.0, -1.05, 50))
         self.assertLess(np.max(np.abs(tau_eggers(r_eggers(tau)) / tau - 1.0)), 1e-12)
 
+    def test_inversion_over_the_whole_admissible_range(self) -> None:
+        R = np.array([1e-300, 1e-30, 1e-6, 0.1])
+        self.assertLess(np.max(np.abs(r_eggers(tau_eggers(R)) / R - 1.0)), 1e-12)
+
     def test_velocity_is_the_time_derivative(self) -> None:
         tau, h = 1e-7, 1e-12
         numerical = (r_eggers(tau + h) - r_eggers(tau - h)) / (2 * h)
