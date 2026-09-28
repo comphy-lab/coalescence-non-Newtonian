@@ -89,6 +89,9 @@ def main() -> None:
     # Leading-order law with its undetermined constant fitted, slope held at 1/pi.
     lo, hi = a.fit_from * ref_run.R0, R_MAX_STOKES
     win = (ref["R_min"] >= lo) & (ref["R_min"] <= hi)
+    if np.count_nonzero(win) < 2:
+        raise SystemExit(f"fit window [{lo:.3g}, {hi:.3g}] holds {np.count_nonzero(win)} samples of "
+                         f"{ref_run.id}; at least 2 are needed")
     shift = ref["u_neck"][win] - u_leading_log(ref["R_min"][win])
     intercept = float(np.mean(shift))
     C = float(np.exp(np.pi * intercept))

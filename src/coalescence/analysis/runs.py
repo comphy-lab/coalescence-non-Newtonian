@@ -65,14 +65,16 @@ def data_roots() -> list[Path]:
 
 
 def neck_file(run: Run, roots: list[Path] | None = None) -> Path:
-    """Locate the run's neck.csv under the data roots and check its SHA-256."""
+    """Locate the run's neck.csv under the data roots whose SHA-256 matches the run list."""
+    mismatched = []
     for root in roots or data_roots():
         path = root / run.id / run.runtime / "neck.csv"
         if path.exists():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != run.neck_sha256:
-                raise ValueError(f"{run.id}: neck.csv SHA-256 {digest} differs from the run list")
-            return path
+            if hashlib.sha256(path.read_bytes()).hexdigest() == run.neck_sha256:
+                return path
+            mismatched.append(str(path))
+    if mismatched:
+        raise ValueError(f"{run.id}: neck.csv SHA-256 differs from the run list at {', '.join(mismatched)}")
     raise FileNotFoundError(f"{run.id}: not found under any data root")
 
 
@@ -84,9 +86,13 @@ def load_series(runs: list[Run], last: Run, roots: list[Path] | None = None) -> 
     runs of the same ``series`` as ``last`` are returned; ``R_step`` holds step radii.
     """
     by_id = {r.id: r for r in runs}
-    chain = [last]
+    chain, seen = [last], {last.id}
     while chain[-1].continues:
-        chain.append(by_id[chain[-1].continues])
+        parent = chain[-1].continues
+        if parent in seen:
+            raise ValueError(f"cyclic continuation through {parent}")
+        seen.add(parent)
+        chain.append(by_id[parent])
     chain.reverse()
     data = None
     for i, run in enumerate(chain):

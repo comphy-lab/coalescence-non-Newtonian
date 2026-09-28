@@ -51,6 +51,19 @@ class RunListTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             neck_file(runs[0], self.roots)
 
+    def test_later_root_with_the_recorded_copy_is_used(self) -> None:
+        runs = load_runs(self.listing)
+        stale = Path(self.tmp.name) / "stale"
+        write_neck(stale / "base/runtime/neck.csv", [1.0], [1.1], [5.0])
+        self.assertEqual(neck_file(runs[0], [stale] + self.roots), self.roots[0] / "base/runtime/neck.csv")
+
+    def test_cyclic_continuation_is_refused(self) -> None:
+        text = self.listing.read_text().replace('series = "linear"\n', 'series = "linear"\ncontinues = "cont"\n')
+        self.listing.write_text(text)
+        runs = load_runs(self.listing)
+        with self.assertRaises(ValueError):
+            load_series(runs, runs[1], self.roots)
+
 
 if __name__ == "__main__":
     unittest.main()

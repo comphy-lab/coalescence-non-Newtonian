@@ -31,11 +31,15 @@ def r_eggers(tau):
 
 
 def tau_eggers(R):
-    """Invert R_min = -(tau_v/pi) ln tau_v on 0 < tau_v < 1/e (bisection in ln tau_v)."""
+    """Invert R_min = -(tau_v/pi) ln tau_v on 0 < tau_v < 1/e (bisection in ln tau_v).
+
+    The root lies in 2 ln R_min - 1 < ln tau_v < -1 for every admissible R_min, since
+    R_min(tau_v) < R_min at tau_v = R_min^2/e.
+    """
     R = np.asarray(R, dtype=float)
     if np.any(R <= 0.0) or np.any(R >= 1.0 / (np.pi * np.e)):
         raise ValueError("R_min must lie in (0, 1/(pi e)), where the law is invertible")
-    lo, hi = np.full(R.shape, -60.0), np.full(R.shape, -1.0)
+    lo, hi = 2.0 * np.log(R) - 1.0, np.full(R.shape, -1.0)
     for _ in range(100):
         mid = 0.5 * (lo + hi)
         big = -(np.exp(mid) / np.pi) * mid > R

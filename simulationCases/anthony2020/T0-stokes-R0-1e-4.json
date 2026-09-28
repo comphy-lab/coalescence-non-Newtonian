@@ -70,6 +70,6 @@
   "provenance": {
     "tier": "T0",
     "reproduces": "Fig. 3 (Stokes reference) from R0=1e-4; initial-radius independence against R0=1e-3",
-    "note": "1/Oh = 0, Z0=R0^2/2. Tip radius ~R^3/5 falls below the 1e-12 meshing floor for R_min < 3.4e-4; that decade is under-resolved and must be labelled as such."
+    "note": "1/Oh = 0, Z0=R0^2/2. Tip radius ~R^3/5 falls below 1e-12 of the drop radius for R_min < 1.7e-4, beneath the element-size floor of an unmapped Gmsh mesh; meshes generated in tip-magnifying coordinates (--tip-map) are not limited by it."
   }
 }

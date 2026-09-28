@@ -75,8 +75,11 @@ python run_bim_stokes.py simulationCases/anthony2020/T5-stokes-R0-1e-06.json --o
 python -m unittest discover -s testCases -t .
 ```
 
-The finite-element runner and its tests need the pinned pyoomph environment; the
-boundary-integral solver needs only numpy and scipy.
+The runners take the physics (R0, Z0, 1/Oh = 0) from the case file and every numerical
+parameter, including the stop radius, from their options; each manifest lists the case
+fields used and records the full command line. The finite-element runner and its tests
+need the pinned pyoomph environment; the boundary-integral solver needs only numpy and
+scipy.
 
 ## Status
 
