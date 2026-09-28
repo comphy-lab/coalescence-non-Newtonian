@@ -30,6 +30,18 @@ def component_commit() -> str:
         return "unknown"
     return commit + ("-dirty" if dirty else "")
 
+def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
+    """Create ``<stem>.json`` exclusively, adding ``-2``, ``-3``... so no earlier record is replaced."""
+    for k in range(1, 1000):
+        path = out / (f"{stem}.json" if k == 1 else f"{stem}-{k}.json")
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(json.dumps(manifest, indent=1))
+            return path
+        except FileExistsError:
+            continue
+    raise SystemExit(f"no free manifest name for {stem} in {out}")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -111,10 +123,9 @@ def main() -> int:
         manifest["restart_from"] = {"path": str(args.restart_from),
                                     "sha256": hashlib.sha256(args.restart_from.read_bytes()).hexdigest(),
                                     "t": restart["t"], "R_min": restart["R_min"]}
-    name = "run-manifest.json"
-    if restart is not None and (args.out / name).exists():
-        name = f"run-manifest-step{int(restart['steps']):06d}.json"   # keep the record of earlier segments
-    (args.out / name).write_text(json.dumps(manifest, indent=1))
+    restarting_here = restart is not None and (args.out / "run-manifest.json").exists()
+    write_manifest(args.out, manifest,
+                   f"run-manifest-step{int(restart['steps']):06d}" if restarting_here else "run-manifest")
     with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
 
