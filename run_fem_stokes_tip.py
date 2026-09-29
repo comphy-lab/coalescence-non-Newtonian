@@ -188,7 +188,7 @@ def main() -> int:
         audit_one_step(pb, args.out, args.audit_dt)
         return 0
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
-    return 0 if summary["status"] in ("reached_R_stop", "wall_limit") else 1
+    return 0 if summary["status"] == "reached_R_stop" else 1
 
 
 if __name__ == "__main__":

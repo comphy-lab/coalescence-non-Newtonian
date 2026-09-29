@@ -80,6 +80,9 @@ def main() -> None:
         if summary["status"] != "reached_R_stop":
             raise ValueError(f"{run.id} did not reach R_stop: {summary['status']}")
         series.append(load_series(runs, run))
+        if not series[-1]["R_min"][0] < a.endpoint <= series[-1]["R_min"][-1]:
+            raise SystemExit(f"--endpoint {a.endpoint:g} lies outside the range of {run.id} "
+                             f"({series[-1]['R_min'][0]:.3g} to {series[-1]['R_min'][-1]:.3g})")
     ref_run, ref = runs[0], series[0]
 
     fig, axes = plt.subplots(1, 3, figsize=(16.0, 5.0), layout="constrained")

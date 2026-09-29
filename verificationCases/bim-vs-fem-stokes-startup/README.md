@@ -12,9 +12,12 @@ they differ in formulation (surface integral equation against a volume mesh),
 geometry representation, tip resolution strategy and time integration.
 
 **Runs** ([`runs.toml`](runs.toml)). The finite-element reference; boundary-integral
-runs at two tip gradings k; and a backward-Euler (Newton) continuation restarted from
-the linearly implicit run, which removes the linearisation error of the linearly
-implicit step in the stiff limit.
+runs at two tip gradings k; and a backward-Euler (Newton) series, which removes the
+linearisation error of the linearly implicit step in the stiff limit. The Newton
+series has two segments: the first restarts from the linearly implicit run, and the
+second continues the first from its final state with a later commit that accepts
+iterations stalled near the tolerance and retries failed steps at half the time
+step. The figure script joins the segments into one curve.
 
 **Compared.** u_v at equal R_min, with boundary-integral speeds assigned to the
 geometric-mean radius of each step, and the tip radius divided by the constant ratio
