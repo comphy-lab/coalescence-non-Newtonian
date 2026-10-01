@@ -34,6 +34,11 @@ def component_commit() -> str:
         return "unknown"
     return commit + ("-dirty" if dirty else "")
 
+def exit_status(summary: dict) -> int:
+    """0 only for a run that reached its stop radius; any other ending is a non-zero exit."""
+    return 0 if summary["status"] == "reached_R_stop" else 1
+
+
 def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
     """Create ``<stem>.json`` exclusively, adding ``-2``, ``-3``... so no earlier record is replaced."""
     for k in range(1, 1000):
@@ -76,6 +81,8 @@ def main() -> int:
                     dt_fraction=a.dt_fraction, curvature_target=a.curvature_target, R_stop=a.r_stop,
                     max_steps=a.max_steps, max_wall_s=a.max_wall_s, newton=a.newton, newton_tol=a.newton_tol,
                     newton_stall=a.newton_stall, newton_retries=a.newton_retries)
+    if a.restart_from is not None and (a.out / "neck.csv").exists():
+        raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
     a.out.mkdir(parents=True, exist_ok=True)
     commit_file = ROOT / "COMMIT"
     if commit_file.is_file():                      # source materialised from an archive
@@ -97,7 +104,7 @@ def main() -> int:
     restarting_here = a.restart_from is not None and (a.out / "run-manifest.json").exists()
     write_manifest(a.out, manifest, f"run-manifest-step{step0:06d}" if restarting_here else "run-manifest")
     summary = run(mer, a.out, cfg, t0=t0, dt0=dt0, steps0=step0)
-    return 0 if summary["status"] == "reached_R_stop" else 1
+    return exit_status(summary)
 
 
 if __name__ == "__main__":
