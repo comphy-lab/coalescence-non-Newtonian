@@ -77,9 +77,11 @@ python -m unittest discover -s testCases -t .
 
 The runners take the physics (R0, Z0, 1/Oh = 0) from the case file and every numerical
 parameter, including the stop radius, from their options; each manifest lists the case
-fields used and records the full command line. The finite-element runner and its tests
-need the pinned pyoomph environment; the boundary-integral solver needs only numpy and
-scipy.
+fields used and records the full command line. A restart (`--restart-from`) writes to
+a new output directory, and the run list joins the segments with `continues`; a runner
+refuses to restart into a directory that already holds a run. The finite-element
+runner and its tests need the pinned pyoomph environment; the boundary-integral solver
+needs only numpy and scipy.
 
 ## Status
 

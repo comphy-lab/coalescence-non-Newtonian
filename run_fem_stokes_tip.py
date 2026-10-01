@@ -30,6 +30,11 @@ def component_commit() -> str:
         return "unknown"
     return commit + ("-dirty" if dirty else "")
 
+def exit_status(summary: dict) -> int:
+    """0 only for a run that reached its stop radius; any other ending is a non-zero exit."""
+    return 0 if summary["status"] == "reached_R_stop" else 1
+
+
 def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
     """Create ``<stem>.json`` exclusively, adding ``-2``, ``-3``... so no earlier record is replaced."""
     for k in range(1, 1000):
@@ -96,6 +101,8 @@ def main() -> int:
     bridge = case["physics"]["initial_bridge"]
     if case["physics"].get("inertia", True):
         raise SystemExit("this runner is for the La=0 Stokes limit only")
+    if args.restart_from is not None and (args.out / "neck.csv").exists():
+        raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
     if args.restart_from is not None and not args.seed_frozen_stokes:
         raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
     if args.seed_frozen_stokes and not args.neck_frame_moving:
@@ -188,7 +195,7 @@ def main() -> int:
         audit_one_step(pb, args.out, args.audit_dt)
         return 0
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
-    return 0 if summary["status"] == "reached_R_stop" else 1
+    return exit_status(summary)
 
 
 if __name__ == "__main__":

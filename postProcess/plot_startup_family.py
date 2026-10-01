@@ -57,6 +57,12 @@ def r0_label(r0: float) -> str:
     return rf"$R_0={m}\times10^{{{int(e)}}}$"
 
 
+def check_endpoint(run_id: str, R: np.ndarray, endpoint: float) -> None:
+    """Refuse an endpoint outside a run's radius range, which would reverse the comparison grid."""
+    if not R[0] < endpoint <= R[-1]:
+        raise SystemExit(f"--endpoint {endpoint:g} lies outside the range of {run_id} ({R[0]:.3g} to {R[-1]:.3g})")
+
+
 def anthony_stokes(path: Path) -> np.ndarray:
     with path.open(newline="") as fh:
         pts = np.array([(float(r["R_min"]), float(r["u_v"])) for r in csv.DictReader(fh)
@@ -80,9 +86,7 @@ def main() -> None:
         if summary["status"] != "reached_R_stop":
             raise ValueError(f"{run.id} did not reach R_stop: {summary['status']}")
         series.append(load_series(runs, run))
-        if not series[-1]["R_min"][0] < a.endpoint <= series[-1]["R_min"][-1]:
-            raise SystemExit(f"--endpoint {a.endpoint:g} lies outside the range of {run.id} "
-                             f"({series[-1]['R_min'][0]:.3g} to {series[-1]['R_min'][-1]:.3g})")
+        check_endpoint(run.id, series[-1]["R_min"], a.endpoint)
     ref_run, ref = runs[0], series[0]
 
     fig, axes = plt.subplots(1, 3, figsize=(16.0, 5.0), layout="constrained")
