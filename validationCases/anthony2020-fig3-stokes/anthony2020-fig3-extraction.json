@@ -1,0 +1,82 @@
+{
+  "source_sha256": "86a7d0b3242b553fa0b1be33a8ca44264fbb9132e6ad27a783f56a3f4d485ec4",
+  "page": 8,
+  "method": "PDF vector marker centres; tick-calibrated; no fitting to theory",
+  "calibration": {
+    "radius": {
+      "x": [
+        21.325321428571414,
+        229.23792857142857
+      ],
+      "y": [
+        -23.779892857142872,
+        83.28160714285715
+      ],
+      "max_tick_residual_pt": 0.003821428571342267
+    },
+    "velocity": {
+      "x": [
+        26.056071428571432,
+        435.6639285714286
+      ],
+      "y": [
+        -29.966514285714293,
+        225.95795238095235
+      ],
+      "max_tick_residual_pt": 0.003357142857112194
+    },
+    "curvature": {
+      "x": [
+        9.997964285714282,
+        238.58803571428575
+      ],
+      "y": [
+        -3.442563636363639,
+        202.87014545454542
+      ],
+      "max_tick_residual_pt": 0.003981818181870267
+    }
+  },
+  "theory_stroke_checks": {
+    "radius": {
+      "samples": 12,
+      "max_distance_to_source_black_stroke_pt": 0.08916696168944523
+    },
+    "velocity": {
+      "samples": 12,
+      "max_distance_to_source_black_stroke_pt": 0.11130402337618185
+    },
+    "curvature": {
+      "samples": 12,
+      "max_distance_to_source_black_stroke_pt": 0.10427538679904179
+    }
+  },
+  "excluded_legend_markers": [
+    [
+      109.14800262451172,
+      96.38897705078125
+    ],
+    [
+      109.14960098266602,
+      105.25640869140625
+    ],
+    [
+      355.11598205566406,
+      98.4320068359375
+    ],
+    [
+      355.1165008544922,
+      107.30892944335938
+    ]
+  ],
+  "counts": {
+    "radius_oh0p6": 106,
+    "radius_stokes": 107,
+    "velocity_oh0p6": 116,
+    "velocity_stokes": 117,
+    "curvature_oh0p6": 46,
+    "curvature_stokes": 46
+  },
+  "roundtrip_max_pt": "<1e-10",
+  "figure11": "unchanged; legacy raster data not revalidated"
+}

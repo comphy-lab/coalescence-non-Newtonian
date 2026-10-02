@@ -22,7 +22,7 @@ pyoomph-build = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyoomph", git = "https://github.com/comphy-lab/pyoomph?rev=a186e07e1a7ea6b74ecc4f3a3fc39cc763d41618" }]
+requires-dist = [{ name = "pyoomph", git = "https://github.com/comphy-lab/pyoomph?rev=f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0" }]
 
 [package.metadata.requires-dev]
 pyoomph-build = [
@@ -305,7 +305,7 @@ wheels = [
 [[package]]
 name = "pyoomph"
 version = "0.2.1"
-source = { git = "https://github.com/comphy-lab/pyoomph?rev=a186e07e1a7ea6b74ecc4f3a3fc39cc763d41618#a186e07e1a7ea6b74ecc4f3a3fc39cc763d41618" }
+source = { git = "https://github.com/comphy-lab/pyoomph?rev=f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0#f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0" }
 dependencies = [
     { name = "matplotlib" },
     { name = "meshio" },
