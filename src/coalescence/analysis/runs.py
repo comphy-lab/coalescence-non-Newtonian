@@ -100,6 +100,9 @@ def load_series(runs: list[Run], last: Run, roots: list[Path] | None = None) -> 
         R_before = run.R0
         if data is not None:
             before = data["t"] < seg["t"][0]
+            if not before.any():
+                raise ValueError(f"{run.id} starts at t = {seg['t'][0]:g}, before any retained sample "
+                                 f"of the run it continues, {chain[i - 1].id}")
             R_before = data["R_min"][before][-1]
             data = {k: v[before] for k, v in data.items()}
         seg["R_step"] = step_radius(seg["R_min"], R_before)
