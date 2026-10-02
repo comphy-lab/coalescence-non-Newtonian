@@ -21,9 +21,18 @@ The extraction confirms that the theory line drawn in panel (b) is
 u_v = −(1/π) ln R_min. Where markers overlap in the graphic, the extracted positions
 carry the corresponding uncertainty; they are not raw simulation data.
 
-**Runs.** The finite-element runs of
-[`../../verificationCases/fem-startup-r0-independence/runs.toml`](../../verificationCases/fem-startup-r0-independence/runs.toml);
-the R0 = 10⁻⁶ run is the reproduction.
+**Runs.** [`runs.toml`](runs.toml): the R0 = 10⁻⁶ computation from the paper's exact
+initial condition. The initial-radius study behind it is
+[`../../verificationCases/fem-startup-r0-independence/`](../../verificationCases/fem-startup-r0-independence/).
 
-**Reproduce.** `postProcess/plot_startup_family.py` (panels (a) and (b) overlay the markers);
-see [`docs/la0-stokes-anthony-fig3.md`](../../docs/la0-stokes-anthony-fig3.md).
+**Reproduce.**
+
+```bash
+python postProcess/plot_anthony_fig3.py validationCases/anthony2020-fig3-stokes/runs.toml \
+  --data validationCases/anthony2020-fig3-stokes --out <output prefix>
+```
+
+The contact time follows the paper's procedure (`src/coalescence/analysis/contact_time.py`);
+the `.json` gives the relative differences from the published markers by range of
+abscissa. `postProcess/plot_startup_family.py` overlays the velocity markers on the
+initial-radius family. See [`docs/la0-stokes-anthony-fig3.md`](../../docs/la0-stokes-anthony-fig3.md).

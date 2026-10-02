@@ -63,5 +63,14 @@ class FigureScriptTests(unittest.TestCase):
                 family.check_endpoint("run", R, endpoint)
 
 
+class Fig3ScriptTests(unittest.TestCase):
+    def test_relative_refuses_a_non_increasing_abscissa(self) -> None:
+        fig3 = load(ROOT / "postProcess" / "plot_anthony_fig3.py")
+        ref = np.array([[2e-6, 1.0], [3e-6, 1.0]])
+        fig3.relative(ref, np.array([1e-6, 2e-6, 4e-6]), np.array([1.0, 1.0, 1.0]))
+        with self.assertRaises(ValueError):
+            fig3.relative(ref, np.array([1e-6, 4e-6, 2e-6]), np.array([1.0, 1.0, 1.0]))
+
+
 if __name__ == "__main__":
     unittest.main()
