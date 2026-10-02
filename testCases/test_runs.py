@@ -26,6 +26,7 @@ class RunListTests(unittest.TestCase):
         self.roots = [root / "data"]
         base = write_neck(root / "data/base/runtime/neck.csv", [1.0, 2.0, 3.0, 4.0], [1.1, 1.2, 1.3, 1.4], [5.0, 5.1, 5.2, 5.3])
         cont = write_neck(root / "data/cont/runtime/neck.csv", [3.0, 5.0], [1.35, 1.5], [5.25, 5.4])
+        self.cont_sha = cont
         self.listing = root / "runs.toml"
         self.listing.write_text(
             '[[run]]\nid = "base"\nsolver = "bim"\ncase = "c.json"\nR0 = 1.0\ncommit = "a"\nruntime = "runtime"\n'
@@ -56,6 +57,13 @@ class RunListTests(unittest.TestCase):
         stale = Path(self.tmp.name) / "stale"
         write_neck(stale / "base/runtime/neck.csv", [1.0], [1.1], [5.0])
         self.assertEqual(neck_file(runs[0], [stale] + self.roots), self.roots[0] / "base/runtime/neck.csv")
+
+    def test_continuation_before_its_parent_is_refused(self) -> None:
+        early = write_neck(Path(self.tmp.name) / "data/cont/runtime/neck.csv", [1.0, 5.0], [1.1, 1.5], [5.0, 5.4])
+        self.listing.write_text(self.listing.read_text().replace(self.cont_sha, early))
+        runs = load_runs(self.listing)
+        with self.assertRaisesRegex(ValueError, "base"):
+            load_series(runs, runs[1], self.roots)
 
     def test_cyclic_continuation_is_refused(self) -> None:
         text = self.listing.read_text().replace('series = "linear"\n', 'series = "linear"\ncontinues = "cont"\n')
