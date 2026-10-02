@@ -49,8 +49,9 @@ from pyoomph.equations.generic import (
     WeakContribution,
 )
 from pyoomph.expressions import cartesian, dot, exp, vector, scale_factor, nondim, pi, matrix, diff, partial_t
+from pyoomph.expressions import directional_derivative, double_dot, grad, subexpression, time_scheme, transpose, var_and_test
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
-from pyoomph.equations.navier_stokes import NavierStokesFreeSurface, StokesEquations
+from pyoomph.equations.navier_stokes import NavierStokesEquations, NavierStokesFreeSurface, StokesEquations
 
 from .geometry import sphere_bridge_junction, sphere_centre
 from .q2_geometry import signed_jacobian_range
@@ -407,6 +408,30 @@ class NeckMovingFreeSurface(NavierStokesFreeSurface):
             testfunction(self.kinbc_name),
             coordsys=self.kinematic_bc_coordsys,
         ))
+
+
+class NeckFrameNavierStokes(NavierStokesEquations):
+    """Navier-Stokes equations in the neck-anchored frame X = r - R_neck(t).
+
+    pyoomph's ALE time derivative removes the motion of the stored coordinate X. The frame
+    itself moves radially at dR_neck/dt, so the Eulerian derivative at fixed r is
+    d_t u|_X - (dR_neck/dt) d_X u. The second term is added to the inertia here; the
+    advective term u.grad(u) is frame-independent because d_X = d_r.
+    """
+
+    def __init__(self, neck_radius, **kwargs):
+        if kwargs.get("GCL"):
+            raise ValueError("the GCL form uses the tensor divergence, which the neck frame does not shift")
+        super().__init__(**kwargs)
+        self.neck_radius = neck_radius
+
+    def define_residuals(self):
+        super().define_residuals()
+        u, u_test = var_and_test(self.velocity_name)
+        rho = subexpression(self.mass_density) if self.wrap_params_in_subexpressions else self.mass_density
+        frame_velocity = vector(partial_t(self.neck_radius, ALE=False), 0)
+        self.add_residual(weak(time_scheme(
+            self.momentum_scheme, -rho * self.dt_factor * directional_derivative(u, frame_velocity)), u_test))
 
 
 class MovingFrameAxisBC(EnforcedBC):
@@ -914,8 +939,18 @@ class StokesTipCoalescence(Problem):
         zone_grading: float = 0.0,
         zone_inner: float = 1e-3,
         zone_outer: float = 2.0,
+        Oh: float | None = None,
+        energy_budget: bool = False,
     ):
         super().__init__()
+        # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
+        # visco-capillary units used throughout, the density is 1/Oh^2.
+        if Oh is not None and not (math.isfinite(float(Oh)) and float(Oh) > 0.0):
+            raise ValueError("Oh must be a positive finite number or None")
+        self.Oh = None if Oh is None else float(Oh)
+        self.rho = None if Oh is None else 1.0 / self.Oh ** 2
+        # Integral observables for the energy budget d/dt(kinetic + area) = -dissipation.
+        self.energy_budget = bool(energy_budget)
         self.R0 = float(R0)
         self.Z0 = float(Z0)
         self.n_tip = int(n_tip)
@@ -1018,6 +1053,8 @@ class StokesTipCoalescence(Problem):
         self.restart_poly = None
         self._restart = dict(restart) if restart else None
         if self._restart is not None:
+            if self.Oh is not None:
+                raise ValueError("a restart file holds the interface only, which is the complete state only in the Stokes limit")
             if not (neck_frame and neck_frame_moving):
                 raise ValueError("restart is implemented for the moving neck frame only")
             self.restart_poly = [(float(x), float(z)) for x, z in self._restart["poly"]]
@@ -1115,7 +1152,12 @@ class StokesTipCoalescence(Problem):
         self._template = MappedTipMesh() if self.tip_map_alpha > 0 else TipGradedQuadrantMesh()
         self.add_mesh(self._template)
 
-        eqs = StokesEquations(dynamic_viscosity=1.0, mode="TH")
+        if self.Oh is None:
+            eqs = StokesEquations(dynamic_viscosity=1.0, mode="TH")
+        elif self.neck_frame_moving:
+            eqs = NeckFrameNavierStokes(Rn, dynamic_viscosity=1.0, mass_density=self.rho, mode="TH")
+        else:
+            eqs = NavierStokesEquations(dynamic_viscosity=1.0, mass_density=self.rho, mode="TH")
         eqs += LaplaceSmoothedMesh()
         # Safety net only; the physics-driven triggers live in actions_after_newton_solve.
         eqs += RemeshWhen(
@@ -1127,6 +1169,13 @@ class StokesTipCoalescence(Problem):
             )
         )
         eqs += IntegralObservables(volume=1)
+        if self.energy_budget:
+            u = var("velocity")
+            G = grad(u)
+            D = 0.5 * (G + transpose(G))
+            eqs += IntegralObservables(dissipation=2.0 * double_dot(D, D))
+            if self.Oh is not None:
+                eqs += IntegralObservables(kinetic=0.5 * self.rho * dot(u, u))
         # Physical radius offset as a dimensional expression (zero in the laboratory frame).
         shift_phys = self._R_shift * scale_factor("spatial") if self.neck_frame else 0
         if self.neck_frame:
@@ -1145,6 +1194,8 @@ class StokesTipCoalescence(Problem):
             NeckMovingFreeSurface(Rn) if self.neck_frame_moving
             else NavierStokesFreeSurface(surface_tension=1.0)
         ) @ "interface"
+        if self.energy_budget:
+            eqs += IntegralObservables(area=1) @ "interface"
         if self.neck_stretch:
             # Make the mesh translate with the neck.  A global unknown R_neck equals the
             # neck node's radial position (point constraint at the interface/plane corner,
@@ -1277,6 +1328,16 @@ class StokesTipCoalescence(Problem):
             if self._restart is not None:
                 self.set_current_time(float(self._restart["t"]), dimensional=False, as_float=True)
             self.assign_initial_values_impulsive()
+
+    def energy_terms(self) -> dict[str, float]:
+        """Kinetic energy, free-surface area and viscous dissipation rate of the computed quadrant."""
+        drop = self.get_mesh("drop")
+        iface = self.get_mesh("drop/interface")
+        return {
+            "kinetic": float(drop.evaluate_observable("kinetic")) if self.Oh is not None else 0.0,
+            "area": float(iface.evaluate_observable("area")),
+            "dissipation": float(drop.evaluate_observable("dissipation")),
+        }
 
     def interface_polyline(self) -> list[tuple[float, float]]:
         from pyoomph.meshes.ordering import sort_line_segments
@@ -1464,6 +1525,9 @@ class StokesTipCoalescence(Problem):
             "t", "R_min", "u_neck", "two_H", "kappa_m", "tip_radius", "Z_b",
             "h_tip_now", "volume", "dt", "ndof", "n_remesh", "newton_iters", "curv_change", "wall_s",
         ]
+        if self.energy_budget:
+            row.update(self.energy_terms())
+            fields += ["kinetic", "area", "dissipation"]
         new = not self._neck_csv.exists()
         with self._neck_csv.open("a", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)

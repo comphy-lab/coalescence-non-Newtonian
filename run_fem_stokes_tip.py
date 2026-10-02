@@ -17,6 +17,8 @@ from coalescence.fem.stokes_tip import StokesTipCoalescence  # noqa: E402
 
 # The case supplies the physics; numerical parameters and the stop radius come from the options.
 CASE_FIELDS_USED = ["schema", "physics.inertia", "physics.initial_bridge.R0", "physics.initial_bridge.Z0"]
+INERTIAL_FIELDS_USED = ["physics.Oh", "physics.initial_velocity"]
+UNITS = "visco-capillary: length R, velocity gamma/mu, time mu R/gamma, pressure gamma/R; density 1/Oh^2"
 
 
 def component_commit() -> str:
@@ -78,6 +80,7 @@ def main() -> int:
     ap.add_argument("--audit-blocks", action="store_true", help="stop after one accepted step and audit frozen Stokes and complement Jacobian blocks")
     ap.add_argument("--audit-dt", type=float, default=None, help="fixed BDF1 timestep for --audit-blocks")
     ap.add_argument("--seed-frozen-stokes", action="store_true", help="seed algebraic Stokes velocity/pressure on the untouched initial geometry")
+    ap.add_argument("--energy-budget", action="store_true", help="record kinetic energy, free-surface area and viscous dissipation in neck.csv")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
@@ -99,8 +102,15 @@ def main() -> int:
     if case.get("schema") != "pyoomph-case-v1":
         raise SystemExit("not a pyoomph-case-v1 case")
     bridge = case["physics"]["initial_bridge"]
+    Oh = None
     if case["physics"].get("inertia", True):
-        raise SystemExit("this runner is for the La=0 Stokes limit only")
+        Oh = float(case["physics"]["Oh"])
+        if case["physics"].get("initial_velocity", "quiescent") != "quiescent":
+            raise SystemExit("an inertial case must start from rest")
+        if args.seed_frozen_stokes:
+            raise SystemExit("the frozen-Stokes seed sets the initial velocity; an inertial case starts from rest")
+        if args.restart_from is not None:
+            raise SystemExit("restart files hold the interface only, the complete state only in the Stokes limit")
     if args.restart_from is not None and (args.out / "neck.csv").exists():
         raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
     if args.restart_from is not None and not args.seed_frozen_stokes:
@@ -118,7 +128,9 @@ def main() -> int:
         "case_sha256": hashlib.sha256(args.case.read_bytes()).hexdigest(),
         "case_id": case["case_id"],
         "component_commit": commit,
-        "case_fields_used": CASE_FIELDS_USED,
+        "case_fields_used": CASE_FIELDS_USED + (INERTIAL_FIELDS_USED if Oh is not None else []),
+        "Oh": Oh,
+        "units": UNITS,
         "pyoomph_module": pyoomph.__file__,
         "argv": sys.argv,
     }
@@ -181,6 +193,8 @@ def main() -> int:
         tip_apex_zone=args.tip_apex_zone,
         zone_inner=args.zone_inner,
         zone_outer=args.zone_outer,
+        Oh=Oh,
+        energy_budget=args.energy_budget,
     )
     pb.quiet()
     if args.seed_frozen_stokes:
