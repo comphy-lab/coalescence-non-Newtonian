@@ -17,11 +17,11 @@ import numpy as np
 COLUMNS = ("t", "R_min", "u_neck", "tip_radius")
 
 
-def read_neck(path: Path, drop_initial: bool = False) -> dict[str, np.ndarray]:
-    """Read the standard columns of a neck.csv; optionally drop the t = 0 row."""
+def read_neck(path: Path, drop_initial: bool = False, extra: tuple[str, ...] = ()) -> dict[str, np.ndarray]:
+    """Read the standard columns of a neck.csv, plus any ``extra`` ones; optionally drop the t = 0 row."""
     with Path(path).open(newline="") as fh:
         rows = list(csv.DictReader(fh))
-    data = {k: np.array([float(r[k]) for r in rows]) for k in COLUMNS}
+    data = {k: np.array([float(r[k]) for r in rows]) for k in COLUMNS + tuple(extra)}
     if drop_initial:
         data = {k: v[1:] for k, v in data.items()}
     if np.any(np.diff(data["t"]) <= 0.0):
