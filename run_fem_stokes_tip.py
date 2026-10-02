@@ -50,7 +50,7 @@ def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
     raise SystemExit(f"no free manifest name for {stem} in {out}")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("case", type=Path)
     ap.add_argument("--out", type=Path, required=True)
@@ -96,7 +96,64 @@ def main() -> int:
     ap.add_argument("--zone-inner", type=float, default=1e-3)
     ap.add_argument("--zone-outer", type=float, default=2.0)
     ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
-    args = ap.parse_args()
+    return ap
+
+
+def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
+                  restart: dict | None) -> StokesTipCoalescence:
+    """The solver for parsed options, the case's initial bridge and Oh (None in the Stokes limit)."""
+    spatial_scale = float(bridge["R0"]) if (args.spatial_scale is not None and args.spatial_scale <= 0) else args.spatial_scale
+    S = spatial_scale if spatial_scale else 1.0
+    # Max-residual roundoff floor: proportional to the initial capillary pressure 1/Z0 and to
+    # 1/S^2 under a pyoomph spatial scale S (measured: 2e-8 at Z0=5e-7, S=1; 0.016 at S=1e-3).
+    newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"])) / S**2
+    return StokesTipCoalescence(
+        R0=float(bridge["R0"]),
+        Z0=float(bridge["Z0"]),
+        output_dir=args.out,
+        n_tip=args.n_tip,
+        grading=args.grading,
+        h_max=args.h_max,
+        dt_fraction=args.dt_fraction,
+        dt_initial=args.dt_initial,
+        remesh_growth=args.remesh_growth,
+        newton_tolerance=newton_tol,
+        R_stop=args.r_stop,
+        neck_stretch=not args.no_neck_stretch,
+        interface_translation=not args.no_interface_translation,
+        h_tip_floor=args.h_tip_floor,
+        tip_refine=args.tip_refine,
+        gmsh_floor=args.gmsh_floor,
+        bisect_floor=args.bisect_floor,
+        spatial_scale=spatial_scale,
+        tip_map_alpha=args.tip_map,
+        tip_rel_floor=args.tip_rel_floor,
+        neck_frame=args.neck_frame,
+        neck_frame_moving=args.neck_frame_moving,
+        tip_map_outer=args.tip_map_outer,
+        tip_map_core=args.tip_map_core,
+        tip_map_linear_core=args.tip_map_linear_core,
+        max_residuals=args.max_residuals,
+        line_search=args.line_search,
+        extra_newton_iterations=args.extra_newton,
+        min_newton_iterations=args.min_newton,
+        curvature_step_limit=args.curvature_step_limit,
+        interface_grading=args.interface_grading,
+        curvature_change_target=args.curvature_change_target,
+        tip_shrink_remesh=args.tip_shrink_remesh,
+        interface_size_growth=args.interface_size_growth,
+        restart=restart,
+        zone_grading=args.zone_grading,
+        tip_apex_zone=args.tip_apex_zone,
+        zone_inner=args.zone_inner,
+        zone_outer=args.zone_outer,
+        Oh=Oh,
+        energy_budget=args.energy_budget,
+    )
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     case = json.loads(args.case.read_text())
     if case.get("schema") != "pyoomph-case-v1":
@@ -148,54 +205,7 @@ def main() -> int:
     with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
 
-    spatial_scale = float(bridge["R0"]) if (args.spatial_scale is not None and args.spatial_scale <= 0) else args.spatial_scale
-    S = spatial_scale if spatial_scale else 1.0
-    # Max-residual roundoff floor: proportional to the initial capillary pressure 1/Z0 and to
-    # 1/S^2 under a pyoomph spatial scale S (measured: 2e-8 at Z0=5e-7, S=1; 0.016 at S=1e-3).
-    newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"])) / S**2
-    pb = StokesTipCoalescence(
-        R0=float(bridge["R0"]),
-        Z0=float(bridge["Z0"]),
-        output_dir=args.out,
-        n_tip=args.n_tip,
-        grading=args.grading,
-        h_max=args.h_max,
-        dt_fraction=args.dt_fraction,
-        dt_initial=args.dt_initial,
-        remesh_growth=args.remesh_growth,
-        newton_tolerance=newton_tol,
-        R_stop=args.r_stop,
-        neck_stretch=not args.no_neck_stretch,
-        interface_translation=not args.no_interface_translation,
-        h_tip_floor=args.h_tip_floor,
-        tip_refine=args.tip_refine,
-        gmsh_floor=args.gmsh_floor,
-        bisect_floor=args.bisect_floor,
-        spatial_scale=spatial_scale,
-        tip_map_alpha=args.tip_map,
-        tip_rel_floor=args.tip_rel_floor,
-        neck_frame=args.neck_frame,
-        neck_frame_moving=args.neck_frame_moving,
-        tip_map_outer=args.tip_map_outer,
-        tip_map_core=args.tip_map_core,
-        tip_map_linear_core=args.tip_map_linear_core,
-        max_residuals=args.max_residuals,
-        line_search=args.line_search,
-        extra_newton_iterations=args.extra_newton,
-        min_newton_iterations=args.min_newton,
-        curvature_step_limit=args.curvature_step_limit,
-        interface_grading=args.interface_grading,
-        curvature_change_target=args.curvature_change_target,
-        tip_shrink_remesh=args.tip_shrink_remesh,
-        interface_size_growth=args.interface_size_growth,
-        restart=restart,
-        zone_grading=args.zone_grading,
-        tip_apex_zone=args.tip_apex_zone,
-        zone_inner=args.zone_inner,
-        zone_outer=args.zone_outer,
-        Oh=Oh,
-        energy_budget=args.energy_budget,
-    )
+    pb = build_problem(args, bridge, Oh, restart)
     pb.quiet()
     if args.seed_frozen_stokes:
         from stokes_block_audit import seed_frozen_stokes
