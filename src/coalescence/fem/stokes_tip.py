@@ -941,6 +941,8 @@ class StokesTipCoalescence(Problem):
         zone_outer: float = 2.0,
         Oh: float | None = None,
         energy_budget: bool = False,
+        t_stop: float | None = None,
+        snapshot_dt: float | None = None,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -966,6 +968,11 @@ class StokesTipCoalescence(Problem):
         self._last_curvature_ratio = 0.0
         self.newton_tolerance = float(newton_tolerance)
         self.R_stop = float(R_stop)
+        # Optional stop time, and interface snapshots in the restart format at uniform time
+        # intervals (a Stokes field is rebuilt from one; see postProcess/reconstruct_stokes_fields.py).
+        self.t_stop = None if t_stop is None else float(t_stop)
+        self.snapshot_dt = None if not snapshot_dt else float(snapshot_dt)
+        self._n_snapshots = 0
         self.h_tip_floor = float(h_tip_floor)
         self.smooth_half_window = int(smooth_half_window)
         self.smooth_tip_span = float(smooth_tip_span)
@@ -1567,6 +1574,23 @@ class StokesTipCoalescence(Problem):
             frame_shift_phys=float(self.frame_shift_phys),
         )
 
+    def write_snapshot(self, state: dict[str, float]) -> None:
+        """Save the current interface in the restart format, sized as a remesh at this instant would be."""
+        rho = state["tip_radius"]
+        if self.tip_unresolved(rho) or not (math.isfinite(rho) and rho > 0):
+            rho = self.rho_resolvable()
+        folder = self.output_root / "snapshots"
+        folder.mkdir(exist_ok=True)
+        numpy.savez(
+            folder / f"snap_{self._n_snapshots:04d}.npz",
+            poly=numpy.asarray(self.interface_polyline(), dtype=float),
+            t=float(state["t"]), R_min=float(state["R_min"]), u_neck=float(state["u_neck"]),
+            tip_radius_lagged=float(rho), rho_at_remesh=float(rho),
+            n_remesh=int(self.n_remesh), steps=int(self._steps), dt=float(self._dt),
+            frame_shift_phys=float(state["R_min"]) if self.neck_frame_moving else float(self.frame_shift_phys),
+        )
+        self._n_snapshots += 1
+
     def dump_interface_velocity(self, path: Path, state: dict[str, float]) -> None:
         """Diagnostic: interface nodes in arclength order with frame X, z and lab velocity."""
         from pyoomph.meshes.ordering import sort_line_segments
@@ -1941,10 +1965,17 @@ class StokesTipCoalescence(Problem):
             flush=True,
         )
         self._dt = float(self._restart["dt"]) if self._restart else self.dt_initial
+        next_snapshot = None
+        if self.snapshot_dt and self.neck_frame_moving:
+            self.write_snapshot(st)
+            next_snapshot = st["t"] + self.snapshot_dt
         status = "running"
         while self._steps < max_steps:
             if st["R_min"] >= self.R_stop:
                 status = "reached_R_stop"
+                break
+            if self.t_stop is not None and st["t"] >= self.t_stop:
+                status = "reached_t_stop"
                 break
             if max_wall_s is not None and time.time() - self._wall0 > max_wall_s:
                 status = "wall_limit"
@@ -2084,6 +2115,9 @@ class StokesTipCoalescence(Problem):
             except Exception:
                 pass
             self.write_row(st, dt, iters)
+            if next_snapshot is not None and st["t"] >= next_snapshot:
+                self.write_snapshot(st)
+                next_snapshot += self.snapshot_dt * math.floor((st["t"] - next_snapshot) / self.snapshot_dt + 1.0)
             if quality_stall:
                 status = "quality_remesh_stall"
                 break
@@ -2116,6 +2150,9 @@ class StokesTipCoalescence(Problem):
                 "neck_frame_moving": self.neck_frame_moving,
                 "tip_map_linear_core": self.tip_map_linear_core,
                 "R_stop": self.R_stop,
+                "t_stop": self.t_stop,
+                "snapshot_dt": self.snapshot_dt,
+                "n_snapshots": self._n_snapshots,
             },
         }
         (self.output_root / "summary.json").write_text(json.dumps(summary, indent=1))

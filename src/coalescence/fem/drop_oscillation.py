@@ -38,7 +38,8 @@ class OscillatingDropMesh(GmshTemplate):
         self.eps, self.resolution, self.n_interface = float(eps), float(resolution), int(n_interface)
 
     def define_geometry(self):
-        self.default_resolution = self.resolution
+        # Gmsh sizes are in stored units x/S, coordinates are converted by point().
+        self.default_resolution = self.resolution / self.get_problem().S
         self.mesh_mode = "tris"
         a = mean_radius(self.eps)
         theta = np.linspace(0.5 * math.pi, 0.0, self.n_interface)       # equator -> pole
@@ -52,15 +53,22 @@ class OscillatingDropMesh(GmshTemplate):
 
 
 class OscillatingDropProblem(Problem):
-    def __init__(self, *, Oh: float, eps: float = 0.01, resolution: float = 0.05):
+    def __init__(self, *, Oh: float, eps: float = 0.01, resolution: float = 0.05, spatial_scale: float = 1.0):
         super().__init__()
         if not Oh > 0:
             raise ValueError("Oh must be positive")
         self.Oh, self.eps, self.resolution = float(Oh), float(eps), float(resolution)
         self.rho = 1.0 / self.Oh ** 2
+        # pyoomph spatial scale: coordinates are stored as x/S. The physics must not depend on
+        # it; the coalescence runs use S = R0, so the oscillation is also run at S != 1.
+        self.S = float(spatial_scale)
+        # pyoomph residuals grow like 1/S^2 under a spatial scale (as in the coalescence runner).
+        self.newton_solver_tolerance = 1e-8 / self.S ** 2
 
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
+        if self.S != 1.0:
+            self.set_scaling(spatial=self.S)
         self += OscillatingDropMesh(self.eps, self.resolution)
         u = var("velocity")
         G = grad(u)
@@ -80,7 +88,7 @@ class OscillatingDropProblem(Problem):
         iface = self.get_mesh("drop/interface")
         pole, equator = 0.0, 0.0
         for n in iface.nodes():
-            x, y = n.x(0), n.x(1)
+            x, y = self.S * n.x(0), self.S * n.x(1)
             if abs(x) < 1e-12:
                 pole = max(pole, y)
             if abs(y) < 1e-12:
