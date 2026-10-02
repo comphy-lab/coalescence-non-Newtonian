@@ -44,5 +44,10 @@ def power_law_contact_time(t, R, R0: float, window: tuple[float, float] = (10.0,
 
 def stokes_law_contact_time(t, R, R_match: float) -> float:
     """Shift that puts R_min(t) on R_min = -(tau/pi) ln tau at R_min = R_match."""
+    t, R = np.asarray(t, dtype=float), np.asarray(R, dtype=float)
+    if np.any(np.diff(R) <= 0.0):
+        raise ValueError("R_min must increase strictly to be interpolated")
+    if not R[0] <= R_match <= R[-1]:
+        raise ValueError(f"R_match = {R_match:g} lies outside the sampled range {R[0]:.3g} to {R[-1]:.3g}")
     tau = brentq(lambda x: -(x / np.pi) * np.log(x) - R_match, 1e-300, 1.0 / np.e)
-    return float(tau - np.interp(R_match, np.asarray(R, dtype=float), np.asarray(t, dtype=float)))
+    return float(tau - np.interp(R_match, R, t))
