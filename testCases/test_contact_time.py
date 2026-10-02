@@ -26,6 +26,13 @@ class ContactTimeTests(unittest.TestCase):
         keep = t > 0
         self.assertAlmostEqual(stokes_law_contact_time(t[keep], R[keep], 1e-5) / shift, 1.0, places=4)
 
+    def test_stokes_law_shift_refuses_bad_input(self) -> None:
+        t, R = np.array([1.0, 2.0, 3.0]), np.array([1e-6, 2e-6, 3e-6])
+        with self.assertRaises(ValueError):
+            stokes_law_contact_time(t, R, 1e-5)                         # outside the range
+        with self.assertRaises(ValueError):
+            stokes_law_contact_time(t, np.array([1e-6, 3e-6, 2e-6]), 2.5e-6)   # not increasing
+
 
 if __name__ == "__main__":
     unittest.main()

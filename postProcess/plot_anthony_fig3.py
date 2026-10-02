@@ -48,6 +48,8 @@ def published(path: Path, xcol: str, ycol: str) -> dict[str, np.ndarray]:
 
 def relative(ref: np.ndarray, xs: np.ndarray, ys: np.ndarray):
     """100 (present/published - 1) at the published abscissae inside the computed range."""
+    if np.any(np.diff(xs) <= 0.0):
+        raise ValueError("the computed abscissa must increase strictly for interpolation")
     k = (ref[:, 0] >= xs.min()) & (ref[:, 0] <= xs.max())
     return ref[k, 0], 100 * (np.interp(np.log(ref[k, 0]), np.log(xs), ys) / ref[k, 1] - 1)
 
