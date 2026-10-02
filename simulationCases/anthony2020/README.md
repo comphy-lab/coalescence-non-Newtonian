@@ -14,7 +14,11 @@ Unless a case says otherwise, \(Z_0 = R_0^2/2\) (approximate point contact).
 | T4 | Oh ∈ {1, 0.1, 0.01, 0.003} | Fig. 11 | \(R_c(\mathrm{Oh})\) from local Re = 1; agrees with linear and log-corrected relations |
 | T5 | Stokes and Oh = 0.6, \(R_0=10^{-6}\) (plus Oh = 0.6 at \(10^{-5}\); Stokes at intermediate \(R_0\) for the initial-radius study) | exact Fig. 3 initial condition | both curves reproduce Fig. 3 after the paper's time-origin fit; convergence in mesh, time step and \(R_0\) is shown separately because the paper does not publish element counts |
 
-T0–T3 are the minimum gate. T4 is the phase diagram. T5 is the stretch.
+T0–T3 are the minimum gate. T4 is the phase diagram. T5 is the stretch. The last
+column states pass conditions, not results. So far only the Stokes cases (T0 and T5)
+have been computed; their comparison with the published figure, including the startup
+transient where the two differ, is in
+[`docs/la0-stokes-anthony-fig3.md`](../../docs/la0-stokes-anthony-fig3.md).
 
 Diagnostics every run records: \(R_{\min}(t)\); \(Z_b=z(r=1.05R_{\min})\);
 \(u_{\min}\); \(\lvert 2H\rvert\) at the neck; interface profile at each remesh;
