@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--audit-blocks", action="store_true", help="stop after one accepted step and audit frozen Stokes and complement Jacobian blocks")
     ap.add_argument("--audit-dt", type=float, default=None, help="fixed BDF1 timestep for --audit-blocks")
     ap.add_argument("--seed-frozen-stokes", action="store_true", help="seed algebraic Stokes velocity/pressure on the untouched initial geometry")
+    ap.add_argument("--stokes-first-guess", action="store_true", help="inertial, moving frame: frozen-Stokes fields as the first Newton iterate only; the run still starts from rest")
     ap.add_argument("--energy-budget", action="store_true", help="record kinetic energy, free-surface area and viscous dissipation in neck.csv")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
@@ -169,7 +170,7 @@ def main() -> int:
         if case["physics"].get("initial_velocity", "quiescent") != "quiescent":
             raise SystemExit("an inertial case must start from rest")
         if args.seed_frozen_stokes:
-            raise SystemExit("the frozen-Stokes seed sets the initial velocity; an inertial case starts from rest")
+            raise SystemExit("the frozen-Stokes seed sets the initial velocity; an inertial case starts from rest (see --stokes-first-guess)")
         if args.restart_from is not None:
             raise SystemExit("restart files hold the interface only, the complete state only in the Stokes limit")
     if args.restart_from is not None and (args.out / "neck.csv").exists():
@@ -178,6 +179,8 @@ def main() -> int:
         raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
     if args.seed_frozen_stokes and not args.neck_frame_moving:
         raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
+    if args.stokes_first_guess and (Oh is None or not args.neck_frame_moving):
+        raise SystemExit("--stokes-first-guess is for inertial cases on the moving-frame route")
     if args.audit_blocks and (args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6):
         raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -215,6 +218,10 @@ def main() -> int:
         from stokes_block_audit import seed_frozen_stokes
         pb.initialise()
         seed_frozen_stokes(pb, args.out, args.dt_initial)
+    elif args.stokes_first_guess:
+        from stokes_block_audit import stokes_first_guess
+        pb.initialise()
+        stokes_first_guess(pb, args.out, args.dt_initial)
     if args.audit_blocks:
         summary = pb.run_campaign(max_steps=1, max_wall_s=args.max_wall_s)
         if summary["steps"] != 1:

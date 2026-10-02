@@ -1756,6 +1756,15 @@ class StokesTipCoalescence(Problem):
         """
         self._newton_iteration = 0
         self._newton_tolerance_before_gate = self.newton_solver_tolerance
+        guess = getattr(self, "_first_newton_guess", None)
+        if guess is not None and self._steps == 0:
+            # Inertial start from rest: the history (shifted above) holds u = 0; only the
+            # first iterate of the first step is the frozen-Stokes field.
+            index, values = guess
+            U = numpy.asarray(self.get_current_dofs()[0], dtype=float)
+            if U.size > int(index.max()):
+                U[index] = values
+                self.set_current_dofs(U)
         if self._predict_now and self._dt_prev is not None and self._dt_prev > 0:
             try:
                 x1 = numpy.asarray(self.get_history_dofs(1), dtype=float)
