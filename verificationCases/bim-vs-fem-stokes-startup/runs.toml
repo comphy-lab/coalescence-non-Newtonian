@@ -1,0 +1,60 @@
+# Boundary-integral runs against the finite-element reference at R0 = 1e-6.
+# Schema: src/coalescence/analysis/runs.py. Outputs are located through data-roots.toml.
+
+[[run]]
+id = "la0-fig3-r0-1e-6-zone-6c9f06c"
+solver = "fem"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "6c9f06c3d763f81d378912f78cb9ea557c2a65b4"
+runtime = "runs/attempts/attempt-0001/runtime"
+neck_sha256 = "067b7f8a39bf01685788f9021f0561e2fa1f6e33009b418f008eb5da74317228"
+role = "reference"
+label = "finite element"
+
+[[run]]
+id = "bim-s1-r0-1e-6-81b995f"
+solver = "bim"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "81b995fe82cbf8e7a1d88f94f196d2ff75ec0726"
+runtime = "runtime"
+neck_sha256 = "a4ab021f556af2d12f10913134f539c78929388ecda253253c26d02e46239495"
+series = "k01"
+label = "boundary integral, $k=0.1$"
+
+[[run]]
+id = "bim-s1k05-r0-1e-6-81b995f"
+solver = "bim"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "81b995fe82cbf8e7a1d88f94f196d2ff75ec0726"
+runtime = "runtime"
+neck_sha256 = "64001bbe81ca7d4c3cfdf42f725e475c4f4075ae0a79fdfeea5ac0655638ab51"
+series = "k005"
+label = "boundary integral, $k=0.05$"
+
+[[run]]
+id = "bim-s1n-r0-1e-6-81b995f"
+solver = "bim"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "81b995fe82cbf8e7a1d88f94f196d2ff75ec0726"
+runtime = "runtime"
+neck_sha256 = "b545c2774f4c024c78d0ada9370216003cc24e9e0b320c73f3309f009db95116"
+series = "newton"
+label = "boundary integral, backward Euler (Newton)"
+continues = "bim-s1-r0-1e-6-81b995f"
+
+
+[[run]]
+id = "bim-s1n2-r0-1e-6-e374beb"
+solver = "bim"
+case = "simulationCases/anthony2020/T5-stokes-R0-1e-06.json"
+R0 = 1e-06
+commit = "e374beb1194178c23767c3626b6d1af5920b1ea6"
+runtime = "runtime"
+neck_sha256 = "7d32c7895c42067b8a3a4292959bcf1343ef60704662c257e940f20b2a959d95"
+series = "newton"
+label = "boundary integral, backward Euler (Newton)"
+continues = "bim-s1n-r0-1e-6-81b995f"

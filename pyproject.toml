@@ -14,7 +14,7 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-pyoomph = { git = "https://github.com/comphy-lab/pyoomph", rev = "a186e07e1a7ea6b74ecc4f3a3fc39cc763d41618" }
+pyoomph = { git = "https://github.com/comphy-lab/pyoomph", rev = "f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0" }
 
 [dependency-groups]
 pyoomph-build = [
