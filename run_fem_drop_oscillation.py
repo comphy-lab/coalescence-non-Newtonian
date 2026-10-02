@@ -40,6 +40,7 @@ def main() -> int:
     ap.add_argument("--resolution", type=float, default=0.05, help="Gmsh element size")
     ap.add_argument("--periods", type=float, default=3.0, help="duration in Rayleigh periods")
     ap.add_argument("--steps-per-period", type=int, default=200)
+    ap.add_argument("--spatial-scale", type=float, default=1.0, help="pyoomph spatial scale (physics must not depend on it)")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if (a.out / "oscillation.csv").exists():
@@ -50,10 +51,10 @@ def main() -> int:
     dt = period / a.steps_per_period
     n_steps = int(round(a.periods * a.steps_per_period))
     manifest = {"solver": "coalescence.fem.drop_oscillation", "component_commit": component_commit(),
-                "Oh": a.Oh, "eps": a.eps, "resolution": a.resolution, "dt": dt, "steps": n_steps,
+                "Oh": a.Oh, "eps": a.eps, "resolution": a.resolution, "spatial_scale": a.spatial_scale, "dt": dt, "steps": n_steps,
                 "theory": theory, "units": "visco-capillary; density 1/Oh^2", "argv": sys.argv}
     (a.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))
-    pb = OscillatingDropProblem(Oh=a.Oh, eps=a.eps, resolution=a.resolution)
+    pb = OscillatingDropProblem(Oh=a.Oh, eps=a.eps, resolution=a.resolution, spatial_scale=a.spatial_scale)
     pb.set_output_directory(str(a.out / "pyoomph"))
     pb.quiet()
     pb.initialise()

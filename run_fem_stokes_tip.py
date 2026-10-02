@@ -33,8 +33,8 @@ def component_commit() -> str:
     return commit + ("-dirty" if dirty else "")
 
 def exit_status(summary: dict) -> int:
-    """0 only for a run that reached its stop radius; any other ending is a non-zero exit."""
-    return 0 if summary["status"] == "reached_R_stop" else 1
+    """0 only for a run that reached its stop radius or stop time; any other ending is a non-zero exit."""
+    return 0 if summary["status"] in ("reached_R_stop", "reached_t_stop") else 1
 
 
 def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--remesh-growth", type=float, default=1.5)
     ap.add_argument("--newton-tol", type=float, default=None, help="default 1e-7*(5e-7/Z0): the max-residual roundoff floor scales with the initial capillary pressure 1/Z0")
     ap.add_argument("--r-stop", type=float, default=0.03)
+    ap.add_argument("--t-stop", type=float, default=None, help="also stop once t reaches this time")
+    ap.add_argument("--snapshot-dt", type=float, default=None, help="moving frame: save the interface in the restart format every this much time")
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
@@ -149,6 +151,8 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         zone_outer=args.zone_outer,
         Oh=Oh,
         energy_budget=args.energy_budget,
+        t_stop=args.t_stop,
+        snapshot_dt=args.snapshot_dt,
     )
 
 

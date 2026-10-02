@@ -6,7 +6,10 @@ geometry at that instant. A moving-frame run saves the interface before every re
 (``restart/remesh_NNNN.npz``), so the full field at those times is recovered by
 building the mesh that followed the saved state, exactly as a restart does, and solving
 the frozen-geometry Stokes problem on it (the seed the run itself started from). Frame 0
-is the initial bridge of the case. Each frame is written as ``fields/frame-NNNN.npz``:
+is the initial bridge of the case. With ``--states snapshots`` the frames are instead the
+uniform-time interface snapshots (``snapshots/snap_NNNN.npz``, runner option
+``--snapshot-dt``), frame k being snapshot k. Each frame is written as
+``fields/frame-NNNN.npz``:
 
 * ``points``: (N, 2) nodal (X, z) with X = r - shift, the solver's neck-frame coordinate
   (r would lose the tip to round-off; add ``shift`` only after scaling);
@@ -40,19 +43,26 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 
-def frame_list(spec: str, n_restart: int) -> list[int]:
+def frame_list(spec: str, last: int) -> list[int]:
     if ":" in spec:
         lo, hi = (int(v) for v in spec.split(":"))
-        frames = list(range(lo, min(hi, n_restart + 1)))
+        frames = list(range(lo, min(hi, last + 1)))
     else:
         frames = [int(v) for v in spec.split(",") if v.strip()]
-    if any(k < 0 or k > n_restart for k in frames):
-        raise SystemExit(f"frames must lie in 0..{n_restart}")
+    if any(k < 0 or k > last for k in frames):
+        raise SystemExit(f"frames must lie in 0..{last}")
     return frames
 
 
-def solve_one(runtime: Path, out: Path, k: int) -> dict:
-    """Frozen-geometry Stokes solve on the mesh that followed remesh state k (k = 0: initial bridge)."""
+def state_file(runtime: Path, states: str, k: int) -> Path | None:
+    """Saved state of frame k; None for frame 0 of the remesh states (the initial bridge)."""
+    if states == "snapshots":
+        return runtime / "snapshots" / f"snap_{k:04d}.npz"
+    return runtime / "restart" / f"remesh_{k:04d}.npz" if k > 0 else None
+
+
+def solve_one(runtime: Path, out: Path, k: int, states: str = "remesh") -> dict:
+    """Frozen-geometry Stokes solve on the mesh built from saved state k (remesh k = 0: initial bridge)."""
     import run_fem_stokes_tip as runner
     from stokes_block_audit import seed_frozen_stokes
     from pyoomph.meshes.meshdatacache import MeshDataCache
@@ -71,8 +81,9 @@ def solve_one(runtime: Path, out: Path, k: int) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     args.out = work
     restart, recorded = None, float("nan")
-    if k > 0:
-        with np.load(runtime / "restart" / f"remesh_{k:04d}.npz") as data:
+    source = state_file(runtime, states, k)
+    if source is not None:
+        with np.load(source) as data:
             restart = {n: (data[n].tolist() if data[n].ndim else data[n].item()) for n in data.files}
         recorded = float(restart["u_neck"])
     wall0 = time.time()
@@ -98,7 +109,7 @@ def solve_one(runtime: Path, out: Path, k: int) -> dict:
         u_neck_recorded=recorded, tip_radius=float(st["tip_radius"]), frame=k,
     )
     rec = {"frame": k, "t": float(st["t"]), "R_min": float(st["R_min"]), "u_neck": float(st["u_neck"]),
-           "u_neck_recorded": recorded, "u_neck_relative_change": float(st["u_neck"] / recorded - 1) if k else None,
+           "u_neck_recorded": recorded, "u_neck_relative_change": float(st["u_neck"] / recorded - 1) if source else None,
            "nodes": int(points.shape[0]), "cells": int(cells.shape[0]),
            "seed_residual_after_max": seed["residual_after_max"], "wall_s": time.time() - wall0}
     (work / "frame.json").write_text(json.dumps(rec, indent=1, allow_nan=True) + "\n")
@@ -111,20 +122,24 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--frames", default=None, help="lo:hi or a comma list; default all saved states and frame 0")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--states", choices=("remesh", "snapshots"), default="remesh")
     ap.add_argument("--one", type=int, default=None, help=argparse.SUPPRESS)
     a = ap.parse_args()
     runtime = a.runtime.resolve()
     out = a.out.resolve()
     if a.one is not None:
-        print(json.dumps(solve_one(runtime, out, a.one)), flush=True)
+        print(json.dumps(solve_one(runtime, out, a.one, a.states)), flush=True)
         return 0
-    n_restart = len(list((runtime / "restart").glob("remesh_*.npz")))
-    frames = frame_list(a.frames or f"0:{n_restart + 1}", n_restart)
+    if a.states == "snapshots":
+        last = len(list((runtime / "snapshots").glob("snap_*.npz"))) - 1
+    else:
+        last = len(list((runtime / "restart").glob("remesh_*.npz")))
+    frames = frame_list(a.frames or f"0:{last + 1}", last)
     out.mkdir(parents=True, exist_ok=True)
     (out / "logs").mkdir(exist_ok=True)
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    manifest = {"source_runtime": str(runtime), "component_commit": commit, "frames": frames,
+    manifest = {"source_runtime": str(runtime), "states": a.states, "component_commit": commit, "frames": frames,
                 "python": sys.executable, "argv": sys.argv}
     (out / "reconstruct-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
 
@@ -132,7 +147,8 @@ def main() -> int:
         if (out / "fields" / f"frame-{k:04d}.npz").exists():
             return k, 0
         with (out / "logs" / f"frame-{k:04d}.log").open("w") as log:
-            proc = subprocess.run([sys.executable, __file__, str(runtime), "--out", str(out), "--one", str(k)],
+            proc = subprocess.run([sys.executable, __file__, str(runtime), "--out", str(out), "--states", a.states,
+                                   "--one", str(k)],
                                   stdout=log, stderr=subprocess.STDOUT, env=env, check=False)
         print(f"frame {k}: exit {proc.returncode}", flush=True)
         return k, proc.returncode
