@@ -83,6 +83,15 @@ refuses to restart into a directory that already holds a run. The finite-element
 runner and its tests need the pinned pyoomph environment; the boundary-integral solver
 needs only numpy and scipy.
 
+Case videos: with `--field-frames` the finite-element runner saves the P2 velocity and
+pressure fields at the start, at every remesh and at every `--snapshot-dt`. The command
+`python postProcess/make_case_video.py <runtime> [<continuation> ...] --out-dir <folder>
+--name <stem>` turns the run folders of one case into a video of three successive zooms
+centred on the neck tip (the drop pair, the neck, the meniscus), each showing the speed
+and the viscous dissipation rate, on a clock that is logarithmic in time early and linear
+late. A Stokes run without saved fields is rebuilt from its saved interfaces, since its
+velocity is fixed by the geometry; an inertial run needs `--field-frames`.
+
 ## Status
 
 The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 has been computed from
