@@ -1,184 +1,206 @@
 # Finite-Ohnesorge validation at Oh = 0.6
 
-This page records the first finite-inertia validation of the tip-graded
-finite-element solver. We compare the present axisymmetric FEM computation with
-the digitised markers of Anthony, Harris & Basaran, *Phys. Rev. Fluids* **5**,
-033608 (2020), Fig. 3, and test the disputed Stokes startup against an
-independent boundary-integral method (BIM). The BIM is a boundary-integral
-solver, not a boundary-element method (BEM).
+Finite inertia slows the growing neck even when its radius is much smaller
+than the Ohnesorge number. At $\mathrm{Oh}=0.6$, our finite-element method
+(FEM) agrees with the developed velocity curve of Anthony, Harris & Basaran,
+*Physical Review Fluids* **5**, 033608 (2020), Fig. 3, while lying below our
+Stokes solution by 6.46% at $R_{\min}=10^{-5}$ and 12.15% at $R_{\min}=0.03$.
+We separate this published-data comparison from numerical verification and
+convergence.
 
-The headline result is simple: at `Oh = 0.6`, the FEM reproduces Anthony's
-published finite-Oh curve in the developed range, while finite inertia lowers
-the neck velocity relative to the Stokes limit by about 6.5% at
-`R_min = 10^-5` and 12.2% at `R_min = 0.03`. The reduction is a physical
-finite-Oh effect in the present start-from-rest problem, not a mesh or time-step
-error at the level tested here.
+The [TeX report](finite-oh-validation/main.tex),
+[compiled PDF](finite-oh-validation/finite-oh-validation-v4.pdf),
+[bibliography](finite-oh-validation/references.bib) and
+[reproduction instructions](finite-oh-validation/README.md) accompany this page.
 
-![Overview of the public finite-Oh validation](figures/public-validation-overview.png)
+![FEM, Anthony's two curves and independent Stokes BIM](figures/public-validation-overview-v4.png)
 
-**Figure 1.** Present FEM and independent BIM neck velocities against neck
-radius. Grey circles and orange triangles are the digitised Stokes and
-`Oh = 0.6` markers of Anthony et al. (2020). The residual panel shows the
-pointwise comparisons without fitted offsets. The green, pink and yellow curves
-are independent BIM calculations with two tip gradings and a backward-Euler
-Newton continuation. The vector figure is
-[`figures/public-validation-overview.pdf`](figures/public-validation-overview.pdf).
+**Figure 1.** Neck velocity in visco-capillary units. Blue: present FEM at
+$\mathrm{Oh}=0.6$; dashed grey: present Stokes FEM. Triangles and circles:
+Anthony et al.'s finite-Oh and Stokes markers, respectively. The independent
+Stokes boundary-integral method (BIM) is shown with two surface gradings and
+backward-Euler Newton iteration. Panel (b) shows FEM/Anthony minus one and
+BIM/FEM minus one at equal radius, in per cent; its range excludes the early
+startup, which is resolved in Figure 4. No marker-fitted offsets are used.
+[Vector PDF](figures/public-validation-overview-v4.pdf).
 
-## Units and comparison protocol
+## Problem and units
 
-The solver uses visco-capillary units throughout: lengths are scaled by the
-drop radius `R`, velocities by `gamma/mu`, and time by `mu R/gamma`. In these
-units the inertial coefficient is `Oh^{-2}`. The case-file prose inherited an
-older inertial-capillary description; the run manifest and the plotted
-quantities are the authoritative units for this comparison.
+Two equal drops of radius $R_d$ coalesce in a passive exterior with zero
+density and viscosity. The dimensionless bridge radius is $R_0=10^{-6}$ and
+its half-height is $Z_0=R_0^2/2$. The initial meridian satisfies
+$[r-(R_0+Z_0)]^2+z^2=Z_0^2$, joined tangentially to the spherical drop.
+The finite-Oh liquid starts from rest.
 
-We construct the paper's time variable as
+Lengths, velocities and times are scaled by $R_d$, $\gamma/\mu$ and
+$\mu R_d/\gamma$, respectively. With
+$\mathrm{Oh}=\mu/\sqrt{\rho\gamma R_d}$, the inertial coefficient is
+$\mathrm{Oh}^{-2}$:
 
-```text
-tau_v = t_v + t_con,v,
-```
+$$
+\mathrm{Oh}^{-2}(\partial_t\boldsymbol{u}+\boldsymbol{u}\cdot\nabla\boldsymbol{u})
+=\nabla\cdot\boldsymbol{\sigma},\qquad
+\nabla\cdot\boldsymbol{u}=0,\qquad
+\boldsymbol{\sigma}=-p\boldsymbol{I}+\nabla\boldsymbol{u}+\nabla\boldsymbol{u}^{T}.
+$$
 
-where `t_con,v` is obtained from the same power-law extrapolation used by
-`postProcess/plot_anthony_fig3.py`, fitted over `10 R0 <= R_min <= 100 R0`.
-The shifts are `1.5202 x 10^-7` for `Oh = 0.6` and `1.4309 x 10^-7` for the
-Stokes reference. We do not fit a time, radius or velocity offset to Anthony's
-markers.
+The solver time is already visco-capillary. We construct
+$\tau_v=t_v+t_{\mathrm{con},v}$ by fitting
+$R_{\min}=A(t_v+t_{\mathrm{con},v})^n$ over
+$10R_0\leq R_{\min}\leq100R_0$, following the extrapolation procedure in
+Anthony et al. The resulting contact shifts are $1.5202\times10^{-7}$ at
+$\mathrm{Oh}=0.6$ and $1.4309\times10^{-7}$ in Stokes flow.
+There is no additional division by Oh and no offset fitted to the published
+markers. These quantities use the existing
+[`plot_anthony_fig3.py`](../postProcess/plot_anthony_fig3.py) comparison helpers.
 
-The production finite-Oh case is
-[`T5-Oh0.6-R0-1e-06.json`](../simulationCases/anthony2020/T5-Oh0.6-R0-1e-06.json),
-with `R0 = 10^-6`, `Z0 = R0^2/2`, and `Oh = 0.6`. Its registered run identity
-and checksum are listed in
-[`validationCases/anthony2020-fig3-oh06/runs.toml`](../validationCases/anthony2020-fig3-oh06/runs.toml).
+## Verification
 
-## Verification and convergence
-
-We keep numerical verification separate from comparison with the published
-markers.
-
-The finite-Oh reference reaches `R_min = 0.03037` in 878 steps and 133
-remeshes. The relative volume drift is `2.85 x 10^-7`. At `R0 = 10^-3`, the
-laboratory-frame and moving-neck-frame histories differ by at most about 0.04%
-in the developed range. The production tip-map and half-time-step partners
-remain within 0.003% in the same range. The `R0 = 10^-6` and `R0 = 10^-3`
-histories join to within 0.04% once `R_min >= 3 x 10^-3`.
-
-![Finite-Oh numerical convergence](figures/finite-oh06-convergence.png)
-
-**Figure 2.** Neck-velocity ratios for the frame, tip-map, time-step and initial
-radius partners at `Oh = 0.6`. The curves are compared at equal `R_min`; no
-offsets are fitted. Vector figure:
-[`figures/finite-oh06-convergence.pdf`](figures/finite-oh06-convergence.pdf).
-
-The normal-mode test of the inertial solver gives a frequency error of
-`-0.044%` at 200 steps per period and `-0.019%` at 400 steps per period. The
-large-Oh limit is also recovered: `Oh = 10^12` reproduces the Stokes steps to
-`10^-14`, while the finite departure at `Oh = 440` is time-step converged. These
-tests are documented in
+The inertial solver recovers the exact linear normal mode of a viscous drop:
+frequency errors are $-0.044\%$ and $-0.019\%$ at 200 and 400 steps per
+period. At $\mathrm{Oh}=10^{12}$ it reproduces the Stokes steps to
+$10^{-14}$ relative. These are tests of the equations and implementation,
+not comparisons with Anthony's data; see
 [`verificationCases/`](../verificationCases/).
 
-## FEM against Anthony et al.
+The $\mathrm{Oh}=0.6$, $R_0=10^{-6}$ history reaches
+$R_{\min}=0.03037$ in 878 steps and 133 remeshes, with relative volume drift
+$2.85\times10^{-7}$.
 
-![Finite-Oh FEM against Anthony et al.](figures/finite-oh06-anthony-comparison.png)
+## Numerical convergence
 
-**Figure 3.** Present FEM against the digitised Stokes and `Oh = 0.6` series of
-Anthony et al. (2020), using the paper's `tau_v` construction and no fitted
-offsets. The developed finite-Oh velocity agrees with the published markers to
-better than 0.1% in the reported bands. The curvature is about 3--4% lower in
-the developed range; the first points are dominated by the same sharp startup
-and tip-curvature sensitivity already identified in the Stokes record. Vector
-figure:
-[`figures/finite-oh06-anthony-comparison.pdf`](figures/finite-oh06-anthony-comparison.pdf).
+![Finite-Oh frame, tip-map and time-step checks](figures/finite-oh06-validation-v3-convergence.png)
 
-The comparison statistics are:
+**Figure 2.** Velocity differences at equal radius for
+$\mathrm{Oh}=0.6$, $R_0=10^{-3}$. Blue compares moving and laboratory
+frames; orange compares single and composite tip maps; green compares the
+half and production time steps using the same single map. The plotted range
+begins at $1.01R_0$. No offsets are fitted.
+[Vector PDF](figures/finite-oh06-validation-v3-convergence.pdf).
 
-| observable | `10^-5 <= R_min < 10^-4` | `10^-4 <= R_min < 10^-3` | `10^-3 <= R_min <= 0.03` |
-|---|---:|---:|---:|
-| `R_min(tau_v)` relative difference | `+0.06%` | `-0.02%` | `-0.03%` |
-| `u_v(R_min)` relative difference | `-0.13%` | `+0.005%` | `+0.04%` |
-| `|2H|(R_min)` relative difference | approximately `-3%` to `-4%` in the developed range | approximately `-3%` to `-4%` | approximately `-3%` to `-4%` |
+Frame differences remain within about 0.045%. The single-map and
+half-time-step comparisons have 95th-percentile absolute differences of
+about 0.003%; this is not a uniform maximum-error bound. These completed
+checks do not establish full finite-Oh mesh and remeshing convergence:
+the bulk-grading 0.07 and remesh-growth 1.05 partners remain outstanding.
 
-The earliest published Stokes markers and the present Stokes startup do not
-coincide. We do not use the finite-Oh comparison to reopen that already closed
-question; the independent BIM test below addresses whether the present FEM
-startup is reproducible for the same equations and initial geometry.
+## Comparison with Anthony et al.
 
-## Independent Stokes BIM check
+![Both Anthony curves and both FEM curves](figures/finite-oh06-validation-v3-anthony.png)
 
-![Stokes BIM and FEM startup](figures/stokes-bim-fem-anthony-startup.png)
+**Figure 3.** (a) Neck radius against $\tau_v$; (b) neck velocity against
+$R_{\min}$; (c) magnitude of twice the mean curvature against $R_{\min}$.
+Both FEM curves and both digitised Anthony series are shown, with the same
+colour and marker convention as Figure 1. The contact-time construction
+affects panel (a) only. No time, radius or velocity offset is fitted to the
+published markers.
+[Vector PDF](figures/finite-oh06-validation-v3-anthony.pdf).
 
-**Figure 4.** Independent axisymmetric BIM calculations against the present
-Stokes FEM for the exact `R0 = 10^-6` bridge. The backward-Euler Newton series,
-which removes the linearisation error of the linearly implicit BIM step, differs
-from the FEM by at most 0.243% over the compared history. The two grading
-partners differ by about 0.489% at worst. The BIM follows the FEM through the
-startup where Anthony's Stokes markers differ. Vector figure:
-[`figures/stokes-bim-fem-anthony-startup.pdf`](figures/stokes-bim-fem-anthony-startup.pdf).
+The table gives **median** differences $100(\mathrm{FEM}/\mathrm{Anthony}-1)$
+for the finite-Oh series. Its ranges refer to the published **abscissa**:
+$\tau_v$ for radius, $R_{\min}$ for velocity and curvature. Markers outside
+the computed coverage are excluded rather than extrapolated.
 
-The two solvers share only the case file. The FEM resolves the volume and
-pressure fields on a tip-graded ALE mesh; the BIM solves the Stokes free-surface
-integral equation on an independently represented meridian. Agreement between
-these formulations is therefore a code-to-code verification of the present
-startup, not a second fit to the published curve. The full run list is in
-[`verificationCases/bim-vs-fem-stokes-startup/`](../verificationCases/bim-vs-fem-stokes-startup/).
+| Quantity | Abscissa | $10^{-5}$ to $10^{-4}$ | $10^{-4}$ to $10^{-3}$ | $10^{-3}$ to $10^{-2}$ | $10^{-2}$ onward within coverage |
+|---|---|---:|---:|---:|---:|
+| $R_{\min}(\tau_v)$ | $\tau_v$ | +0.062% | -0.023% | -0.029% | -0.033% |
+| $u_v(R_{\min})$ | $R_{\min}$ | -0.133% | +0.005% | +0.028% | +0.044% |
+| $\lvert2H\rvert(R_{\min})$ | $R_{\min}$ | +3.19% | -3.50% | -3.04% | -3.37% |
 
-## What small inertia does
+For $R_{\min}\geq10^{-4}$, the finite-Oh velocity errors range from
+$-0.027\%$ to $+0.057\%$. Curvature is approximately 3--4% lower there.
+The $10^{-5}$ to $10^{-4}$ band still contains a curvature transient:
+differences range from $-3.86\%$ to $+73.31\%$.
+We do not extend the developed-range agreement to the startup.
+The earliest finite-Oh velocity markers differ by up to about 3.8%, and
+the radius comparison remains sensitive to the extrapolated contact time.
 
-At equal `R_min`, finite inertia reduces the neck velocity relative to the
-Stokes reference as follows:
+## Independent Stokes BIM
 
-| `R_min` | `R_min/Oh` | `u_v - u_v,Stokes` | relative difference |
+![Independent Stokes BIM versus FEM and Anthony's startup](figures/stokes-bim-fem-anthony-startup.png)
+
+**Figure 4.** Independent Stokes BIM against the Stokes FEM for the same
+$R_0=10^{-6}$ bridge, with Anthony's Stokes markers. The backward-Euler
+Newton series differs from the FEM by at most 0.243% over its compared
+history; the two linearly implicit grading series differ from the FEM by
+at most approximately 0.489%. The two gradings agree much more closely
+with each other. Velocity is the discriminating observable; the two
+tip-curvature estimators carry approximately 4% estimator uncertainty.
+[Vector PDF](figures/stokes-bim-fem-anthony-startup.pdf).
+
+The BIM and FEM independently reproduce the startup peak where Anthony's
+Stokes markers differ. The FEM solves for volume velocity and pressure on
+an ALE mesh; the BIM solves the Stokes integral equation on a spline
+meridian. The solver implementations are independent and use the same
+case geometry. We use BIM to name this boundary-integral solver throughout;
+there is no additional independent finite-Oh boundary solver in this comparison.
+This is code-to-code verification of the Stokes problem, not validation
+of finite inertia or a fit to Anthony's startup.
+
+## Initial-radius independence
+
+![Stokes radius family and finite-Oh two-radius check](figures/finite-oh06-validation-v3-r0.png)
+
+**Figure 5.** (a) Eight Stokes histories spanning $R_0=10^{-6}$ to
+$10^{-3}$; (b) the finite-Oh histories at the two endpoints; (c) their
+velocity difference at equal radius. The Stokes curves join the smallest
+bridge's curve within 0.1% by approximately $2.3$--$2.7R_0$. At
+$\mathrm{Oh}=0.6$, the $R_0=10^{-3}$ and $10^{-6}$ histories differ by at
+most 0.042% for $R_{\min}\geq3\times10^{-3}$, with no offsets fitted.
+[Vector PDF](figures/finite-oh06-validation-v3-r0.pdf).
+
+The Stokes family is complete. The finite-Oh result is presently a
+two-radius check; the intermediate radii $10^{-4}$ and $10^{-5}$ have not
+yet been computed.
+
+## Finite inertia relative to Stokes
+
+![Finite-Oh velocity deficit and logarithmic slopes](figures/finite-oh06-validation-v3-deficit.png)
+
+**Figure 6.** (a) Relative and (b) absolute velocity deficit at equal neck
+radius; (c) local logarithmic slopes normalized by $1/\pi$, measured using
+secants across 0.2 decades. The grey curve is Stokes and the blue curve is
+$\mathrm{Oh}=0.6$.
+[Vector PDF](figures/finite-oh06-validation-v3-deficit.pdf).
+
+| $R_{\min}$ | $R_{\min}/\mathrm{Oh}$ | $u_v-u_{v,\mathrm{S}}$ | Relative difference |
 |---:|---:|---:|---:|
-| `10^-5` | `1.67 x 10^-5` | `-0.2765` | `-6.46%` |
-| `10^-4` | `1.67 x 10^-4` | `-0.2408` | `-6.80%` |
-| `10^-3` | `1.67 x 10^-3` | `-0.2103` | `-7.49%` |
-| `10^-2` | `1.67 x 10^-2` | `-0.1979` | `-9.56%` |
-| `0.03` | `0.05` | `-0.2086` | `-12.15%` |
+| $10^{-5}$ | $1.67\times10^{-5}$ | -0.2765 | -6.46% |
+| $10^{-4}$ | $1.67\times10^{-4}$ | -0.2408 | -6.80% |
+| $10^{-3}$ | $1.67\times10^{-3}$ | -0.2103 | -7.49% |
+| $10^{-2}$ | $1.67\times10^{-2}$ | -0.1979 | -9.56% |
+| $0.03$ | $0.05$ | -0.2086 | -12.15% |
 
-The absolute deficit is nearly constant, about `-0.2` to `-0.28`, while the
-relative deficit grows because the Stokes logarithm decreases with `R_min`.
-Writing the Stokes law as `u_v = -(1/pi) ln(R_min/C)` gives an effective
-cut-off ratio `C_finite-Oh/C_Stokes` of about 0.44 at `R_min = 10^-5` and 0.53
-by `R_min = 10^-2--0.03`. The local logarithmic slope is also slightly smaller
-than the Stokes value, about 0.955--0.985 of `1/pi` between `10^-5` and
-`10^-2`.
+The absolute deficit varies between about $-0.28$ and $-0.20$ over this
+range. Its relative magnitude grows as the Stokes velocity falls. Writing
+$u_v=\pi^{-1}\ln(C/R_{\min})$ defines a diagnostic
+$C_{\mathrm{eff}}=R_{\min}\exp(\pi u_v)$. The inferred finite-Oh/Stokes
+ratio is 0.4196 at $R_{\min}=10^{-5}$, 0.5371 at $10^{-2}$ and 0.5193 at
+$0.03$. The value 0.444 is the first-decade median, not the value at
+$10^{-5}$.
 
-This makes a changed outer cut-off of the Stokes logarithm a plausible mechanism,
-but not a complete explanation: the data show both a cut-off/prefactor change
-and a weak slope change. The present run only reaches `R_min/Oh = 0.05`, well
-below the expected Stokes-to-inviscid crossover `R_c approximately Oh`. An Oh
-ladder extended to `R_min` of order `Oh` is therefore required before we can
-claim a crossover mechanism.
+A changed outer cut-off of the Stokes logarithm is a plausible
+interpretation, not an established mechanism. The normalized finite-Oh
+slope has decade medians of approximately 0.955, 0.961 and 0.985 between
+$10^{-5}$ and $10^{-2}$.
+Since this run reaches only $R_{\min}/\mathrm{Oh}=0.05$, it does not test
+the expected crossover at $R_c\approx\mathrm{Oh}$. An Oh ladder reaching
+that scale is needed to distinguish the cut-off hypothesis from other
+finite-inertia corrections.
 
 ## Reproduction
 
-Rebuild the overview from the registered FEM, BIM and digitised data with:
+The [report build](finite-oh-validation/README.md) uses compact,
+checksum-verified inputs and writes every render under a new prefix.
+[`plot_finite_oh_validation.py`](../postProcess/plot_finite_oh_validation.py)
+rebuilds Figures 2, 3, 5 and 6;
+[`plot_public_validation.py`](../postProcess/plot_public_validation.py)
+rebuilds Figure 1. Both also accept `--archive` to use the registered raw
+histories through the existing `data-roots.toml` mechanism.
+The BIM figure's source is
+[`plot_bim_vs_fem.py`](../postProcess/plot_bim_vs_fem.py), with its registered
+inputs in [`verificationCases/bim-vs-fem-stokes-startup/`](../verificationCases/bim-vs-fem-stokes-startup/).
 
-```bash
-python postProcess/plot_public_validation.py \
-  --out <new-output-prefix>
-```
-
-The comparison and convergence figures are rebuilt by the scripts named in the
-corresponding evidence folders. The PDF figures in `docs/figures/` use embedded
-Computer Modern fonts and are ready for inclusion from TeX with, for example:
-
-```tex
-\begin{figure}
-  \centering
-  \includegraphics[width=\linewidth]{figures/public-validation-overview.pdf}
-  \caption{Finite-Oh FEM, Stokes FEM, Anthony et al. markers and independent BIM.}
-\end{figure}
-```
-
-The public validation case is
-[`validationCases/anthony2020-fig3-oh06/README.md`](../validationCases/anthony2020-fig3-oh06/README.md).
-The Stokes limiting case remains documented in
-[`docs/la0-stokes-anthony-fig3.md`](la0-stokes-anthony-fig3.md).
-
-## Scope of the result
-
-This page establishes the `Oh = 0.6`, `R0 = 10^-6` comparison and the
-independent Stokes startup check. It does not claim that the `Oh` ladder or the
-`R_c approximately Oh` crossover has been completed. Those are the next
-discriminating calculations, after the exact case list and compute capacity have
-been confirmed.
+The original finite-Oh comparison is retained unchanged as
+[PNG](figures/finite-oh06-anthony-comparison.png) and
+[PDF](figures/finite-oh06-anthony-comparison.pdf).

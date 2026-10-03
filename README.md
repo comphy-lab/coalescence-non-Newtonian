@@ -41,7 +41,9 @@ compared with.
 | `docs/` | Approved documentation. |
 
 `fem` and `bim` never import each other and share only the case files, so agreement
-between them is a test of the numerics of each. Run output is never stored here.
+between them is a test of the numerics of each. Raw meshes, field histories and
+restart data remain outside this repository; approved documentation includes
+compact scalar plot inputs.
 Each evidence case lists its simulations in a `runs.toml` by identifier, commit and
 SHA-256 of the neck history; the figure scripts find the outputs through an
 untracked `data-roots.toml` (see `src/coalescence/analysis/runs.py`).
@@ -103,7 +105,11 @@ the Stokes limit and its numerical choices at Oh = 0.6 (`verificationCases/`). A
 Oh = 0.6, the FEM agrees with Anthony et al. in the developed velocity range and
 shows a finite-inertia deficit of 6.5% at R_min = 10⁻⁵ and 12.2% at R_min = 0.03;
 an independent Stokes BIM reproduces the FEM startup to 0.243%. The complete
-validation record is [`docs/finite-oh-validation.md`](docs/finite-oh-validation.md).
+validation record is [`docs/finite-oh-validation.md`](docs/finite-oh-validation.md),
+with a [compiled TeX report](docs/finite-oh-validation/finite-oh-validation-v4.pdf).
+The eight-radius Stokes family is complete; the finite-Oh endpoint radii agree
+within 0.042% beyond R_min = 0.003. Intermediate finite-Oh radii and the remaining
+mesh/remeshing partners are not yet computed.
 The Oh ladder needed to test the crossover at R_c approximately Oh remains open.
 The non-Newtonian problems are not yet computed.
 

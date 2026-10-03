@@ -7,12 +7,16 @@ shown as the limiting reference, not as a fitted correction.
 
 The independent boundary-integral method is documented separately in
 [`verificationCases/bim-vs-fem-stokes-startup/`](../../verificationCases/bim-vs-fem-stokes-startup/).
-It is a Stokes BIM, not a BEM, and is used to adjudicate the early discrepancy
-between the present Stokes FEM and the published Stokes startup markers.
+It is an independently implemented Stokes BIM, used to verify the early
+startup where present Stokes FEM and published Stokes markers differ.
+It does not solve the inertial problem.
 
 The promoted result, including the unit check, the FEM comparison, the measured
 finite-Oh deficit relative to Stokes, and the R0-independence evidence, is in
 [`docs/finite-oh-validation.md`](../../docs/finite-oh-validation.md).
 
 The run identities and neck-history checksums are in [`runs.toml`](runs.toml).
-The figure is rebuilt by `postProcess/plot_public_validation.py`.
+The overview is rebuilt by `postProcess/plot_public_validation.py`; the
+three-quantity comparison, consistency checks and R0 plots are rebuilt by
+`postProcess/plot_finite_oh_validation.py`. Both use the compact public
+plot-input bundle by default, or registered raw histories with `--archive`.

@@ -10,3 +10,5 @@ See the repository [README](../README.md) for the layout contract.
   present finite-inertia FEM against Anthony et al. (2020), an independent
   Stokes BIM startup check, numerical convergence, and the measured finite-Oh
   velocity deficit relative to Stokes.
+- [TeX validation report](finite-oh-validation/README.md): compiled PDF,
+  bibliography, reusable figure environments and compact reproduction data.

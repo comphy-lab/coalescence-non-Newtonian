@@ -78,7 +78,7 @@ grows again as about 0.2 R_min³.
 
 The exact runner arguments are listed under [Reproduction](#reproduction).
 
-## Verification
+## Numerical convergence
 
 All differences below are between complete computations with no fitted
 offsets.
@@ -123,6 +123,12 @@ markers; (c) relative difference in u_v over the shared range. No offsets
 are fitted. Vector version:
 [`figures/initial-radius-independence-stokes.pdf`](figures/initial-radius-independence-stokes.pdf).
 
+The completed eight-radius Stokes family spans $R_0=10^{-6}$ to $10^{-3}$.
+Its velocity curves join the smallest bridge's curve within 0.1% by
+approximately $2.3$--$2.7R_0$. The original two-radius comparison above is
+retained; the full family and the distinct finite-Oh two-radius check are
+shown in [the validation account](finite-oh-validation.md#initial-radius-independence).
+
 ## Comparison with the published figure
 
 Relative difference of the present computation from the published Stokes
@@ -149,6 +155,26 @@ markers, (present/published − 1):
   sharper than the published one. The present startup curve is converged to
   about 0.1% in space by the tests above, and the difference is not reduced by
   refinement; its origin is not resolved.
+
+## Independent Stokes verification
+
+![Independent Stokes BIM, FEM and Anthony's startup](figures/stokes-bim-fem-anthony-startup.png)
+
+**Figure 3.** The independently implemented Stokes boundary-integral method
+(BIM) and FEM resolve the same startup peak for $R_0=10^{-6}$. The
+backward-Euler Newton BIM series differs from FEM by at most 0.243%; the
+linearly implicit grading series differ by at most approximately 0.489%.
+Panel (c) distinguishes velocity from the tip-radius estimators, which
+carry approximately 4% estimator uncertainty.
+[Vector PDF](figures/stokes-bim-fem-anthony-startup.pdf).
+
+The BIM solves a Stokes integral equation on a spline meridian, without
+FEM fields or pressure data. Its agreement with FEM supports the computed
+Stokes startup where the published markers differ; it does not establish
+the cause of that difference. The boundary solver is Stokes-only and does
+not provide an independent finite-Oh calculation. The
+[combined validation report](finite-oh-validation/README.md) separates this
+code-to-code verification from the comparison with Anthony et al.
 
 ## Reproduction
 
