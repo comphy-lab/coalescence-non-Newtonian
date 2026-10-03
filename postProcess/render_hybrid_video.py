@@ -6,18 +6,27 @@ order, for example the remesh states of a startup run followed by the uniform-ti
 snapshots of its continuation. Frames that do not advance the time are dropped, so a
 restart state present in both folders is drawn once.
 
-Three panels per frame share one (t, R_min, rho) stamp:
+Three panels per frame share one (t, R_min, rho) stamp. They are successive zooms on the
+neck tip: the window of each zoomed panel is a square centred on the tip, of half-width
+ell, and is marked in the previous panel by a dashed box once that box is larger than a
+pixel. The half-widths are
+
+    ell_b = min(R_min, 0.7),   ell_c = min(6 rho, ell_b / 10),
+
+so (b) is the neck window [0, 2 R_min] x [-R_min, R_min] until R_min reaches a third of the
+height of (a), and (c) is the meniscus window (six tip radii) until the tip radius, which
+grows like R_min^3, would make (c) less than ten times magnified from (b). The nesting
+never inverts.
 
 * **(a) the pair** at a fixed physical scale (as ``render_drop_pair_video.py``): the speed
-  |u| left of the axis and log10 Phi right, both drops shown. A dashed box marks the window
-  of (b) once it is larger than a pixel.
-* **(b) the neck**, lengths over R_min (the ``neck`` view of ``render_neck_video.py``): |u|
-  in the upper drop and log10(Phi R_min^2) in the lower one. A dashed box marks the window
-  of (c) once it is larger than a pixel.
-* **(c) the meniscus**, comoving with the tip: (r - R_min, z)/rho, the speed relative to the
-  advancing neck |u - U e_r| above the plane and log10(Phi rho^2) below. When the window
-  reaches past the axis (late times, rho comparable with R_min) the field is continued
-  by its mirror image in the axis.
+  |u| left of the axis and log10 Phi right, both drops shown.
+* **(b) the neck**: (r - R_min, z)/ell_b; |u| in the upper drop and log10(Phi ell_b^2) in
+  the lower one.
+* **(c) the meniscus**, comoving with the tip: (r - R_min, z)/ell_c; the speed relative to
+  the advancing neck, |u - U e_r|, above the plane and log10(Phi ell_c^2) below.
+
+The dashed line inside the liquid of every panel is the symmetry plane z = 0 (the axis
+r = 0 in (a)), where the speed half meets the dissipation half.
 
 Playback follows a warped clock, s = ln t for t < t_s and s = ln t_s + (t - t_s)/t_s beyond
 (continuous in value and slope): the startup is shown on a logarithmic clock, slowly, and
@@ -56,12 +65,20 @@ from matplotlib.tri import LinearTriInterpolator, Triangulation  # noqa: E402
 import render_drop_pair_video as pair  # noqa: E402
 from render_neck_video import (  # noqa: E402
     _SUBTRIS, CMAP_DISS, CMAP_SPEED, DECADES, FS_CBAR_LABEL, FS_CBAR_TICK, FS_LABEL, FS_TICK, FS_TITLE,
-    VIEWS, Frame, interface_chain, load_frame, png_size, read_series, sci, strain_fields,
+    Frame, interface_chain, load_frame, png_size, read_series, sci, strain_fields,
 )
 
-NECK = next(v for v in VIEWS if v.name == "neck")
-MEN_HALF = 6.0          # meniscus window half-width in tip radii
+LB_CAP = 0.7            # (b) half-width cap: a third of the half-height of (a)
+ZOOM_C = 10.0           # (c) is at least this many times magnified from (b)
+MEN_TIPS = 6.0          # (c) half-width in tip radii while the tip is small
 BOX_STYLE = dict(fill=False, ls=(0, (4, 3)), lw=1.4, ec="0.2", zorder=8)
+BOX_MIN = 0.01          # draw a box once its side exceeds this fraction of the panel
+
+
+def zoom_scales(fr: Frame) -> tuple[float, float]:
+    """Half-widths of the (b) and (c) windows, both centred on the neck tip."""
+    lb = min(fr.R_min, LB_CAP)
+    return lb, min(MEN_TIPS * fr.rho, lb / ZOOM_C)
 
 
 def collect(folders: list[Path]) -> list[Path]:
@@ -101,35 +118,30 @@ def fmt(v: float) -> str:
     return f"{v:.3f}" if 1e-2 <= abs(v) < 10 else ("0" if v == 0 else sci(v))
 
 
-# -------------------------------------------------------------- meniscus panel
+# ---------------------------------------------------------------- zoom panels
 
-def meniscus_coords(fr: Frame, mirror_axis: bool) -> tuple[np.ndarray, np.ndarray]:
-    """(r - R_min, z)/rho from the solver's X = r - R_neck; in the axis mirror r -> -r."""
-    X = fr.points[:, 0]
-    x = (-X - 2.0 * fr.shift) if mirror_axis else X
-    return x / fr.rho, fr.points[:, 1] / fr.rho
+def zoom_coords(fr: Frame, ell: float) -> tuple[np.ndarray, np.ndarray]:
+    """(r - R_min, z)/ell from the solver's X = r - R_neck, so the tip keeps its digits."""
+    return fr.points[:, 0] / ell, fr.points[:, 1] / ell
 
 
-def meniscus_relative_speed(fr: Frame, mirror_axis: bool) -> np.ndarray:
-    u_r = -fr.velocity[:, 0] if mirror_axis else fr.velocity[:, 0]
-    return np.hypot(u_r - fr.U, fr.velocity[:, 1])
-
-
-def window_tris(x: np.ndarray, y: np.ndarray, fr: Frame, half: float, sign_y: float) -> Triangulation | None:
+def window_tris(x: np.ndarray, y: np.ndarray, fr: Frame, sign_y: float) -> Triangulation | None:
+    """Sub-triangles near the window [-1, 1]^2; sub-pixel slivers of the tip cluster dropped."""
     tris = fr.cells[:, _SUBTRIS].reshape(-1, 3)
-    pad = 0.05 * half
-    near = np.any((np.abs(x[tris]) <= half + pad) & (y[tris] <= half + pad), axis=1)
+    near = np.any((np.abs(x[tris]) <= 1.05) & (y[tris] <= 1.05), axis=1)
     tris = tris[near]
     if not len(tris):
         return None
     x0, y0 = x[tris[:, 0]], y[tris[:, 0]]
     area = 0.5 * np.abs((x[tris[:, 1]] - x0) * (y[tris[:, 2]] - y0) - (x[tris[:, 2]] - x0) * (y[tris[:, 1]] - y0))
-    tris = tris[area > (2e-9 * half) ** 2]
+    tris = tris[area > 4e-18]
     return Triangulation(x, sign_y * y, tris) if len(tris) else None
 
 
-def axis_in_window(fr: Frame) -> bool:
-    return fr.R_min - MEN_HALF * fr.rho < 0.0
+def zoom_fields(fr: Frame, phi: np.ndarray, ell: float, relative: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Upper field (|u|, or |u - U e_r| comoving with the tip) and log10(Phi ell^2)."""
+    up = np.hypot(fr.velocity[:, 0] - (fr.U if relative else 0.0), fr.velocity[:, 1])
+    return up, np.log10(np.maximum(phi * ell ** 2, 1e-300))
 
 
 # ------------------------------------------------------------------- drawing
@@ -198,8 +210,9 @@ def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
         for sz in (1.0, -1.0):
             ax.plot(sx * r_c, sz * z_c, color="black", lw=1.4, zorder=6)
     ax.axvline(0.0, color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
-    if fr.R_min > 0.006 * pair.Z_LIM:
-        ax.add_patch(Rectangle((0.0, -fr.R_min), 2.0 * fr.R_min, 2.0 * fr.R_min, **BOX_STYLE))
+    lb, lc = zoom_scales(fr)
+    if 2.0 * lb > BOX_MIN * 2.0 * pair.Z_LIM:
+        ax.add_patch(Rectangle((fr.R_min - lb, -lb), 2.0 * lb, 2.0 * lb, **BOX_STYLE))
     ax.set_xlim(-pair.R_LIM, pair.R_LIM)
     ax.set_ylim(-pair.Z_LIM, pair.Z_LIM)
     ax.set_aspect("equal", adjustable="box")
@@ -209,55 +222,34 @@ def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
     style_axes(ax, r"$r$", r"$z$", "(a)")
     colourbars(fig, lay, lay.rects[0], lim, r"$|\mathbf{u}|$  (left)", r"$\log_{10}\Phi$  (right)")
 
-    # (b) the neck, lengths over R_min
-    lim = lay.limits["neck"]
-    ax = fig.add_axes(lay.rects[1])
-    ax.tripcolor(NECK.triangulation(fr, mirror=False), NECK.upper(fr), shading="gouraud", cmap=CMAP_SPEED,
-                 vmin=0.0, vmax=lim["vmax"], rasterized=True)
-    ax.tripcolor(NECK.triangulation(fr, mirror=True), NECK.lower(fr, phi), shading="gouraud", cmap=CMAP_DISS,
-                 vmin=lim["dmin"], vmax=lim["dmax"], rasterized=True)
-    xb, yb = NECK.coords(fr)
-    ax.plot(xb[chain], yb[chain], color="black", lw=1.6, zorder=6)
-    ax.plot(xb[chain], -yb[chain], color="black", lw=1.6, zorder=6)
-    ax.plot([0.0, 1.0], [0.0, 0.0], color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
-    half_b = MEN_HALF * fr.rho / fr.R_min
-    if 0.006 * (NECK.xlim[1] - NECK.xlim[0]) < half_b < 1.0:      # visible and inside (b)
-        ax.add_patch(Rectangle((1.0 - half_b, -half_b), 2.0 * half_b, 2.0 * half_b, **BOX_STYLE))
-    ax.set_xlim(*NECK.xlim)
-    ax.set_ylim(*NECK.ylim)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xticks(np.arange(NECK.xlim[0], NECK.xlim[1] + 1e-9, NECK.tick))
-    ax.set_yticks(np.arange(NECK.ylim[0], NECK.ylim[1] + 1e-9, NECK.tick))
-    style_axes(ax, NECK.xlabel, NECK.ylabel, "(b)")
-    colourbars(fig, lay, lay.rects[1], lim, NECK.upper_label, NECK.lower_label)
-
-    # (c) the meniscus, comoving with the tip, lengths over rho
-    lim = lay.limits["meniscus"]
-    ax = fig.add_axes(lay.rects[2])
-    log_phi_rho = np.log10(np.maximum(phi * fr.rho ** 2, 1e-300))
-    mirrors = (False, True) if axis_in_window(fr) else (False,)
-    for m in mirrors:
-        x, y = meniscus_coords(fr, m)
-        up, lo = window_tris(x, y, fr, MEN_HALF, 1.0), window_tris(x, y, fr, MEN_HALF, -1.0)
-        if up is not None:
-            ax.tripcolor(up, meniscus_relative_speed(fr, m), shading="gouraud", cmap=CMAP_SPEED,
-                         vmin=0.0, vmax=lim["vmax"], rasterized=True)
-        if lo is not None:
-            ax.tripcolor(lo, log_phi_rho, shading="gouraud", cmap=CMAP_DISS,
-                         vmin=lim["dmin"], vmax=lim["dmax"], rasterized=True)
+    # (b) and (c): successive zooms centred on the tip
+    panels = (("neck", lb, lc, False, "b", r"$|\mathbf{u}|$"),
+              ("meniscus", lc, None, True, "c", r"$|\mathbf{u}-U\mathbf{e}_r|$"))
+    for rect, (key, ell, ell_next, relative, tag, upper_label) in zip(lay.rects[1:], panels):
+        lim = lay.limits[key]
+        ax = fig.add_axes(rect)
+        x, y = zoom_coords(fr, ell)
+        up, lo = zoom_fields(fr, phi, ell, relative)
+        tri_u, tri_l = window_tris(x, y, fr, 1.0), window_tris(x, y, fr, -1.0)
+        if tri_u is not None:
+            ax.tripcolor(tri_u, up, shading="gouraud", cmap=CMAP_SPEED, vmin=0.0, vmax=lim["vmax"], rasterized=True)
+        if tri_l is not None:
+            ax.tripcolor(tri_l, lo, shading="gouraud", cmap=CMAP_DISS, vmin=lim["dmin"], vmax=lim["dmax"],
+                         rasterized=True)
         ax.plot(x[chain], y[chain], color="black", lw=1.6, zorder=6)
         ax.plot(x[chain], -y[chain], color="black", lw=1.6, zorder=6)
-    x_axis = -fr.R_min / fr.rho
-    ax.plot([max(-MEN_HALF, x_axis), 0.0], [0.0, 0.0], color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
-    if x_axis > -MEN_HALF:
-        ax.axvline(x_axis, color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
-    ax.set_xlim(-MEN_HALF, MEN_HALF)
-    ax.set_ylim(-MEN_HALF, MEN_HALF)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xticks(np.arange(-MEN_HALF, MEN_HALF + 1e-9, 2.0))
-    ax.set_yticks(np.arange(-MEN_HALF, MEN_HALF + 1e-9, 2.0))
-    style_axes(ax, r"$(r-R_{\min})/\rho$", r"$z/\rho$", "(c)")
-    colourbars(fig, lay, lay.rects[2], lim, r"$|\mathbf{u}-U\mathbf{e}_r|$", r"$\log_{10}(\Phi\rho^2)$")
+        ax.plot([-1.0, 0.0], [0.0, 0.0], color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
+        if ell_next is not None and 2.0 * ell_next / ell > BOX_MIN * 2.0:
+            h = ell_next / ell
+            ax.add_patch(Rectangle((-h, -h), 2.0 * h, 2.0 * h, **BOX_STYLE))
+        ax.set_xlim(-1.0, 1.0)
+        ax.set_ylim(-1.0, 1.0)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xticks(np.arange(-1.0, 1.0 + 1e-9, 0.5))
+        ax.set_yticks(np.arange(-1.0, 1.0 + 1e-9, 0.5))
+        style_axes(ax, rf"$(r-R_{{\min}})/\ell_{tag}$", rf"$z/\ell_{tag}$",
+                   rf"({tag})   $\ell_{tag} = {fmt(ell)}$")
+        colourbars(fig, lay, rect, lim, upper_label, rf"$\log_{{10}}(\Phi\,\ell_{tag}^2)$")
 
     fig.text(0.5, 1.0 - 0.42 / lay.fig_h,
              rf"$t = {fmt(fr.t)}$,   $R_{{\min}} = {fmt(fr.R_min)}$,   $\rho = {fmt(fr.rho)}$",
@@ -284,22 +276,22 @@ def colour_limits(files: list[Path], n_probe: int = 16) -> dict[str, dict[str, f
     each window) of a spread of frames; dissipation over DECADES below its maximum."""
     probes = [load_frame(int(i), files[int(i)])
               for i in np.unique(np.linspace(0, len(files) - 1, min(n_probe, len(files))).astype(int))]
+    zoom_grid = np.meshgrid(np.linspace(-1.0, 1.0, 241), np.linspace(0.0, 1.0, 121))
     grids = {
         "pair": np.meshgrid(np.linspace(0.0, pair.R_LIM, 161), np.linspace(0.0, pair.Z_LIM, 211)),
-        "neck": np.meshgrid(np.linspace(*NECK.xlim, 241), np.linspace(0.0, NECK.ylim[1], 121)),
-        "meniscus": np.meshgrid(np.linspace(-MEN_HALF, MEN_HALF, 241), np.linspace(0.0, MEN_HALF, 121)),
+        "neck": zoom_grid,
+        "meniscus": zoom_grid,
     }
     samples = {k: ([], []) for k in grids}
     for fr in probes:
         phi = strain_fields(fr)["phi"]
-        fields = {
-            "pair": (pair.quadrant_triangulation(fr, 1.0, 1.0), np.hypot(*fr.velocity.T), np.log10(np.maximum(phi, 1e-300))),
-            "neck": (NECK.triangulation(fr, mirror=False), NECK.upper(fr), NECK.lower(fr, phi)),
-        }
-        x, y = meniscus_coords(fr, False)
-        tri = window_tris(x, y, fr, MEN_HALF, 1.0)
-        if tri is not None:
-            fields["meniscus"] = (tri, meniscus_relative_speed(fr, False), np.log10(np.maximum(phi * fr.rho ** 2, 1e-300)))
+        fields = {"pair": (pair.quadrant_triangulation(fr, 1.0, 1.0), np.hypot(*fr.velocity.T),
+                           np.log10(np.maximum(phi, 1e-300)))}
+        for key, ell, relative in zip(("neck", "meniscus"), zoom_scales(fr), (False, True)):
+            x, y = zoom_coords(fr, ell)
+            tri = window_tris(x, y, fr, 1.0)
+            if tri is not None:
+                fields[key] = (tri, *zoom_fields(fr, phi, ell, relative))
         for k, (tri, up, lo) in fields.items():
             gx, gy = grids[k]
             su = LinearTriInterpolator(tri, up)(gx, gy).compressed()
