@@ -8,10 +8,12 @@ the neck history of the same run:
 * **(d)** R_min against tau_v = t + t_con, with the published Stokes curve
   R_min = -(tau_v/pi) ln tau_v, as in Anthony, Harris & Basaran (2020), Figure 3(a);
 * **(e)** u_v against R_min, with u_v = -(1/pi) ln R_min, as in their Figure 3(b);
-* **(f)** u_v against R_min for the runs of a family of initial radii R0 (static).
+* **(f)** u_v against R_min for the runs of a family of initial radii R0.
 
-In (d) and (e) the computed curve grows with the video: each frame draws the history up to
-its own time and marks the current state. t_con follows the paper's procedure (a power law
+In (d) and (e), and for the family member with the run's own R0 in (f), the computed curve
+grows with the video: each frame draws the history up to its own time (in (f) the whole
+history of the run and its continuations, like (e)) and marks the current state. The other
+family members are static. t_con follows the paper's procedure (a power law
 fitted once R_min has grown by one decade, 10 R0 to 100 R0, extrapolated to zero radius;
 ``coalescence.analysis.contact_time``), and no quantity is fitted to the published data.
 The digitised published series are drawn as markers when ``--anthony`` is given. The
@@ -186,10 +188,20 @@ def draw_history(fig, rects, fr: Frame, p: Plots) -> None:
     ax = fig.add_axes(rects[2])
     ax.plot(rr, -np.log(rr) / np.pi, "k-", lw=1.3, label=r"$u_v=-(1/\pi)\ln R_{\min}$")
     colours = plt.cm.viridis(np.linspace(0.0, 0.88, max(len(p.family), 1)))
+    R0_run = float(p.R[0])
     for (R0, R, u), c in zip(p.family, colours):
         m, e = f"{R0:.2e}".split("e")
         label = rf"$R_0 = 10^{{{int(e)}}}$" if float(m) == 1.0 else rf"$R_0 = {float(m):.3g}\times10^{{{int(e)}}}$"
-        ax.plot(R, u, color=c, lw=1.8, label=label)
+        if abs(R0 / R0_run - 1.0) < 1e-9:
+            # This run: its whole history, growing with the video; from the first computed step,
+            # as for the rest of the family.
+            grow = now.copy()
+            grow[0] = False
+            # Drawn above the static family so its growth stays visible where they collapse.
+            ax.plot(p.R[grow], p.u[grow], color=c, lw=2.2, label=label, zorder=6)
+            ax.plot([fr.R_min], [fr.U], "o", ms=8, color=c, mec="white", mew=1.4, zorder=8)
+        else:
+            ax.plot(R, u, color=c, lw=1.8, label=label)
     ax.set(xscale="log", xlim=(7e-7, 1.3), ylim=(0.0, 5.3))
     style(ax, r"$R_{\min}$", r"$u_v$", "(f)")
     ax.legend(frameon=False, fontsize=FS_LEGEND - 1, loc="upper right", ncol=2, columnspacing=0.8,
