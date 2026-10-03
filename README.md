@@ -98,7 +98,10 @@ The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 has been computed f
 their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03. It agrees
 with the published curve for R_min ≥ 10⁻⁴ but not during the startup transient; see
 [`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
-finite-Ohnesorge branch and the non-Newtonian problems are not yet computed.
+finite-Ohnesorge solver is verified against the exact linear modes of a viscous drop, in
+the Stokes limit and for its numerical choices at Oh = 0.6 (`verificationCases/`), and the
+Oh = 0.6 branch has been computed from R0 = 10⁻⁶ and 10⁻³ to R_min = 0.03; its comparison
+with the published curve is open. The non-Newtonian problems are not yet computed.
 
 ## Archived lines
 
