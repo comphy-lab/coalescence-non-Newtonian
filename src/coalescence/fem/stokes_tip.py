@@ -943,6 +943,7 @@ class StokesTipCoalescence(Problem):
         energy_budget: bool = False,
         t_stop: float | None = None,
         snapshot_dt: float | None = None,
+        field_frames: bool = False,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -973,6 +974,10 @@ class StokesTipCoalescence(Problem):
         self.t_stop = None if t_stop is None else float(t_stop)
         self.snapshot_dt = None if not snapshot_dt else float(snapshot_dt)
         self._n_snapshots = 0
+        # Full P2 fields (velocity, pressure) at the start, at every remesh and at every snapshot
+        # time, for any rheology or inertia; postProcess/make_case_video.py renders them.
+        self.field_frames = bool(field_frames)
+        self._n_field_frames = 0
         self.h_tip_floor = float(h_tip_floor)
         self.smooth_half_window = int(smooth_half_window)
         self.smooth_tip_span = float(smooth_tip_span)
@@ -1591,6 +1596,40 @@ class StokesTipCoalescence(Problem):
         )
         self._n_snapshots += 1
 
+    def write_field_frame(self, state: dict[str, float]) -> None:
+        """Save the bulk P2 mesh and fields of the current state as ``fields/frame-NNNN.npz``.
+
+        Coordinates are stored relative to the neck, X = r - R_min, with ``shift`` = R_min, in
+        every frame of reference: in the moving neck frame this is the solver's own coordinate,
+        so the tip keeps its digits. Velocity is the laboratory velocity. The keys are those
+        of ``postProcess/reconstruct_stokes_fields.py``.
+        """
+        from pyoomph.meshes.meshdatacache import MeshDataCache
+
+        entry = MeshDataCache(tesselate_tri=False, nondimensional=False).get_data(self.get_mesh("drop"))
+        if list(numpy.unique(numpy.asarray(entry.elem_types))) != [9]:
+            raise RuntimeError("field frames expect six-node triangles only")
+        shift = self._frame_shift_now() if self.neck_frame else 0.0
+        R_min = float(state["R_min"])
+        X = numpy.asarray(entry.get_data("coordinate_x"), dtype=float)
+        if not self.neck_frame_moving:
+            X = X + (shift - R_min)
+        folder = self.output_root / "fields"
+        folder.mkdir(exist_ok=True)
+        numpy.savez_compressed(
+            folder / f"frame-{self._n_field_frames:04d}.npz",
+            points=numpy.column_stack([X, entry.get_data("coordinate_y")]),
+            cells=numpy.asarray(entry.elem_indices, dtype=numpy.int64)[:, :6],
+            velocity=numpy.column_stack([entry.get_data("velocity_x"), entry.get_data("velocity_y")]),
+            pressure=numpy.asarray(entry.get_data("pressure"), dtype=float),
+            shift=R_min if not self.neck_frame_moving else shift,
+            t=float(state["t"]), R_min=R_min, u_neck=float(state["u_neck"]),
+            u_neck_recorded=float(state["u_neck"]), tip_radius=float(state["tip_radius"]),
+            frame=self._n_field_frames, n_remesh=int(self.n_remesh), steps=int(self._steps),
+            Oh=float("nan") if self.Oh is None else self.Oh,
+        )
+        self._n_field_frames += 1
+
     def dump_interface_velocity(self, path: Path, state: dict[str, float]) -> None:
         """Diagnostic: interface nodes in arclength order with frame X, z and lab velocity."""
         from pyoomph.meshes.ordering import sort_line_segments
@@ -1856,6 +1895,8 @@ class StokesTipCoalescence(Problem):
         self._pre_remesh_state = st
         self._pre_remesh_poly = self.interface_polyline()
         self.write_restart_state(st)
+        if self.field_frames:
+            self.write_field_frame(st)
         vel_dump = os.environ.get("LA0_VEL_DUMP")
         if vel_dump:
             Path(vel_dump).mkdir(parents=True, exist_ok=True)
@@ -1975,8 +2016,11 @@ class StokesTipCoalescence(Problem):
         )
         self._dt = float(self._restart["dt"]) if self._restart else self.dt_initial
         next_snapshot = None
-        if self.snapshot_dt and self.neck_frame_moving:
-            self.write_snapshot(st)
+        if self.field_frames:
+            self.write_field_frame(st)
+        if self.snapshot_dt and (self.neck_frame_moving or self.field_frames):
+            if self.neck_frame_moving:
+                self.write_snapshot(st)
             next_snapshot = st["t"] + self.snapshot_dt
         status = "running"
         while self._steps < max_steps:
@@ -2125,7 +2169,10 @@ class StokesTipCoalescence(Problem):
                 pass
             self.write_row(st, dt, iters)
             if next_snapshot is not None and st["t"] >= next_snapshot:
-                self.write_snapshot(st)
+                if self.neck_frame_moving:
+                    self.write_snapshot(st)
+                if self.field_frames:
+                    self.write_field_frame(st)
                 next_snapshot += self.snapshot_dt * math.floor((st["t"] - next_snapshot) / self.snapshot_dt + 1.0)
             if quality_stall:
                 status = "quality_remesh_stall"
@@ -2162,6 +2209,7 @@ class StokesTipCoalescence(Problem):
                 "t_stop": self.t_stop,
                 "snapshot_dt": self.snapshot_dt,
                 "n_snapshots": self._n_snapshots,
+                "field_frames": self._n_field_frames,
             },
         }
         (self.output_root / "summary.json").write_text(json.dumps(summary, indent=1))

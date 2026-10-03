@@ -64,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--r-stop", type=float, default=0.03)
     ap.add_argument("--t-stop", type=float, default=None, help="also stop once t reaches this time")
     ap.add_argument("--snapshot-dt", type=float, default=None, help="moving frame: save the interface in the restart format every this much time")
+    ap.add_argument("--field-frames", action="store_true", help="save the full P2 fields at the start, at every remesh and every --snapshot-dt (for make_case_video.py)")
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
@@ -154,6 +155,7 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         energy_budget=args.energy_budget,
         t_stop=args.t_stop,
         snapshot_dt=args.snapshot_dt,
+        field_frames=args.field_frames,
     )
 
 
