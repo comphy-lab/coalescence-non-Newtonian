@@ -32,8 +32,9 @@ initial-radius study. The energy budget closes with median relative residuals be
 percentile is large, consistent with area changes per step below the round-off of the
 area integral at the smallest R_min, and has not been examined further.
 
-**Not yet done.** Mesh-grading and remesh-interval partners; comparison with the Oh = 0.6
-data of Anthony et al. (2020), Figure 3.
+The comparison with the Oh = 0.6 data of Anthony et al. (2020), Figure 3, is
+documented in [`docs/finite-oh-validation.md`](../../docs/finite-oh-validation.md).
+Mesh-grading and remesh-interval partners remain open convergence checks.
 
 **Reproduce.**
 

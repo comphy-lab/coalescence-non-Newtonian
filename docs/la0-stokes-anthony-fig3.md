@@ -3,8 +3,9 @@
 This note documents the Stokes-limit (La = 0, 1/Oh = 0) reproduction of
 Figure 3 of Anthony, Harris & Basaran, *Phys. Rev. Fluids* **5**, 033608
 (2020), starting from their exact initial bridge, and the numerical method
-that makes the computation possible. The finite-Ohnesorge branch of that
-figure (Oh = 0.6) has not yet been computed here.
+that makes the computation possible. The corresponding finite-Ohnesorge
+comparison at Oh = 0.6, including the independent BIM startup check, is now
+documented in [Finite-Ohnesorge validation at Oh = 0.6](finite-oh-validation.md).
 
 ![Reproduction of Anthony et al. (2020) Figure 3, Stokes branch](figures/anthony-fig3-reproduction-stokes.png)
 

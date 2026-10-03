@@ -98,10 +98,14 @@ The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 has been computed f
 their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03. It agrees
 with the published curve for R_min ≥ 10⁻⁴ but not during the startup transient; see
 [`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
-finite-Ohnesorge solver is verified against the exact linear modes of a viscous drop, in
-the Stokes limit and for its numerical choices at Oh = 0.6 (`verificationCases/`), and the
-Oh = 0.6 branch has been computed from R0 = 10⁻⁶ and 10⁻³ to R_min = 0.03; its comparison
-with the published curve is open. The non-Newtonian problems are not yet computed.
+finite-Ohnesorge solver is verified against the exact linear modes of a viscous drop,
+the Stokes limit and its numerical choices at Oh = 0.6 (`verificationCases/`). At
+Oh = 0.6, the FEM agrees with Anthony et al. in the developed velocity range and
+shows a finite-inertia deficit of 6.5% at R_min = 10⁻⁵ and 12.2% at R_min = 0.03;
+an independent Stokes BIM reproduces the FEM startup to 0.243%. The complete
+validation record is [`docs/finite-oh-validation.md`](docs/finite-oh-validation.md).
+The Oh ladder needed to test the crossover at R_c approximately Oh remains open.
+The non-Newtonian problems are not yet computed.
 
 ## Archived lines
 

@@ -20,8 +20,10 @@ computed; their comparison with the published figure, including the startup tran
 where the two differ, is in
 [`docs/la0-stokes-anthony-fig3.md`](../../docs/la0-stokes-anthony-fig3.md). Of the inertial
 cases, T1 at R0 = 10⁻³, T3 at Oh = 440 and T5 at Oh = 0.6 and R0 = 10⁻⁶ have been computed for
-the verification in [`verificationCases/`](../../verificationCases/); their comparison with
-the published figures is open.
+the verification in [`verificationCases/`](../../verificationCases/). The Oh = 0.6,
+R0 = 10⁻⁶ comparison with Anthony et al. and the independent Stokes BIM startup check are
+documented in [`docs/finite-oh-validation.md`](../../docs/finite-oh-validation.md). The
+remaining Oh ladder and crossover comparison are open.
 
 Diagnostics every run records: \(R_{\min}(t)\); \(Z_b=z(r=1.05R_{\min})\);
 \(u_{\min}\); \(\lvert 2H\rvert\) at the neck; interface profile at each remesh;
