@@ -1,0 +1,54 @@
+# Oh = 0.6: frame of reference, mesh, time step and initial radius.
+# Schema: src/coalescence/analysis/runs.py. Outputs are located through data-roots.toml.
+
+[[run]]
+id = "oh06-r1e-3-lab"
+solver = "fem"
+case = "simulationCases/anthony2020/T1-Oh0.6-R0-1e-03.json"
+R0 = 1e-03
+commit = "0a1e16e0d4f47a0e7c5e45f393b6414032f9cee7"
+runtime = "runtime"
+neck_sha256 = "22da669b9950bebbd8db0b08907edaca57681178db30810ac870aad688f99a22"
+role = "reference"
+label = "laboratory frame, composite tip map"
+
+[[run]]
+id = "oh06-r1e-3-mov"
+solver = "fem"
+case = "simulationCases/anthony2020/T1-Oh0.6-R0-1e-03.json"
+R0 = 1e-03
+commit = "0a1e16e0d4f47a0e7c5e45f393b6414032f9cee7"
+runtime = "runtime"
+neck_sha256 = "41f4d7769c075259dd1d0afc2f53b34d7d5bec6643ff0ca561abf8b29208e867"
+label = "moving neck frame"
+
+[[run]]
+id = "oh06-r1e-3-prod"
+solver = "fem"
+case = "simulationCases/anthony2020/T1-Oh0.6-R0-1e-03.json"
+R0 = 1e-03
+commit = "0a1e16e0d4f47a0e7c5e45f393b6414032f9cee7"
+runtime = "runtime"
+neck_sha256 = "25cd0de6c60acdf59e11df3c12aadc9f7da35c48318bc9cade12930e18f88a6c"
+label = "laboratory frame, single tip map"
+
+[[run]]
+id = "v4-oh06-r1e-3-halfdt"
+solver = "fem"
+case = "simulationCases/anthony2020/T1-Oh0.6-R0-1e-03.json"
+R0 = 1e-03
+commit = "a37a3c9c4df57e5e057c197bf7457c9b71a9446e"
+runtime = "runtime"
+neck_sha256 = "d536ee1031f46c520d72fd8e4513d65c625514db9352a19d2bb6bf41421a118a"
+series = "half-dt"
+label = "single tip map, half time step"
+
+[[run]]
+id = "la0-oh06-r0-1e-6-16fc4a0"
+solver = "fem"
+case = "simulationCases/anthony2020/T5-Oh0.6-R0-1e-06.json"
+R0 = 1e-06
+commit = "16fc4a098faae8ed0bb5663ade92239dbab4df28"
+runtime = "runs/attempts/attempt-0001/runtime"
+neck_sha256 = "372f2427e610d6d508e65ea7d960c9a1d055ec1b5902436c7ca5926f3e0254e1"
+label = "$R_0=10^{-6}$, moving neck frame"
