@@ -189,8 +189,8 @@ def colourbars(fig, lay: Layout, rect, lim: dict[str, float], upper_label: str, 
         cb.ax.tick_params(labelsize=FS_CBAR_TICK)
 
 
-def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
-    fig = plt.figure(figsize=(lay.fig_w, lay.fig_h))
+def draw_panels(fig, fr: Frame, lay: Layout) -> None:
+    """The three nested panels (a)-(c) and their colour bars, into ``lay.rects`` of ``fig``."""
     phi = strain_fields(fr)["phi"]
     log_phi = np.log10(np.maximum(phi, 1e-300))
     chain = interface_chain(fr)
@@ -251,9 +251,18 @@ def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
                    rf"({tag})   $\ell_{tag} = {fmt(ell)}$")
         colourbars(fig, lay, rect, lim, upper_label, rf"$\log_{{10}}(\Phi\,\ell_{tag}^2)$")
 
-    fig.text(0.5, 1.0 - 0.42 / lay.fig_h,
+
+
+def draw_stamp(fig, fr: Frame, fig_h: float) -> None:
+    fig.text(0.5, 1.0 - 0.42 / fig_h,
              rf"$t = {fmt(fr.t)}$,   $R_{{\min}} = {fmt(fr.R_min)}$,   $\rho = {fmt(fr.rho)}$",
              ha="center", va="center", fontsize=FS_TITLE)
+
+
+def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
+    fig = plt.figure(figsize=(lay.fig_w, lay.fig_h))
+    draw_panels(fig, fr, lay)
+    draw_stamp(fig, fr, lay.fig_h)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(dest, dpi=lay.dpi)
     plt.close(fig)
