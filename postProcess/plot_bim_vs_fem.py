@@ -11,8 +11,8 @@ the interpolated finite-element curve. The tip radius of the boundary-integral r
 divided by ``--estimator-factor``, the ratio of the two codes' tip-radius estimators.
 No offsets are fitted.
 
-    python postProcess/plot_bim_vs_fem.py verificationCases/bim-vs-fem-stokes-startup/runs.toml \
-        --anthony validationCases/anthony2020-fig3-stokes/anthony2020-fig3-velocity-digitized.csv \
+    python postProcess/plot_bim_vs_fem.py <run list> \
+        --anthony validationCases/anthony2020/data/anthony2020-fig3-velocity-digitized.csv \
         --out <output prefix>
 """
 
