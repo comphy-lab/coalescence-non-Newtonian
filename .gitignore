@@ -14,3 +14,6 @@ runs/
 # local map from simulation identifiers to data directories (see src/coalescence/analysis/runs.py)
 /data-roots.toml
 /receipts/
+
+# Private run records: never committed
+runs.toml
