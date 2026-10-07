@@ -48,6 +48,7 @@ class CaseValidationTests(unittest.TestCase):
             "Z0": lambda c: c["physics"]["initial_bridge"].pop("Z0"),
             "exterior": lambda c: c["physics"]["exterior"].update(viscosity=0.1),
             "boolean exterior": lambda c: c["physics"]["exterior"].update(density=False),
+            "oversized Oh": lambda c: c["physics"].update(Oh=10 ** 400),
             "rest": lambda c: c["physics"].update(initial_velocity="uniform"),
         }
         for name, spoil in defects.items():

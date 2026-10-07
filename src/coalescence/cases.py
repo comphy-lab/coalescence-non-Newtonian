@@ -14,7 +14,13 @@ SCHEMA = "pyoomph-case-v1"
 
 
 def _number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A finite int or float; booleans and integers too large for a float are not numbers here."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _positive(value: Any) -> bool:
