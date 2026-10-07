@@ -120,7 +120,7 @@ def check_playback(times: np.ndarray, duration: float, hold_first: float, fps: i
         raise SystemExit("a video needs at least two frames (t = 0 and one later state)")
     if hold_first < 0:
         raise SystemExit("--hold-first must not be negative")
-    if int(round((duration - hold_first) * fps)) < 1:
+    if round((duration - hold_first) * fps) < 1:
         raise SystemExit("--duration must exceed --hold-first by at least one output frame")
 
 

@@ -14,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "postProcess"))
 import reconstruct_stokes_fields
+from make_case_video import stills
 from check_energy_budget import budget
 from render_case_dashboard_video import initial_radius
 from render_hybrid_video import check_playback, link_sequence, playback_sequence
@@ -47,6 +48,19 @@ class PlaybackTests(unittest.TestCase):
         times = np.array([0.0, 1e-3, 1e-2])
         check_playback(times, 2.0, 0.6, 30)
         self.assertEqual(len(playback_sequence(times, 0.05, 2.0, 30, 0.6)), 60)
+
+
+class CaseVideoTests(unittest.TestCase):
+    def test_stills_match_the_name_literally(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        media = Path(tmp.name)
+        for name in ("a-still-0000.png", "a-still-0007.png", "ab-still-0000.png", "a-still-x-still-0000.png",
+                     "a-still-0000.png.bak", "a.mp4", "[a]-still-0001.png"):
+            (media / name).write_bytes(b"")
+        self.assertEqual([p.name for p in stills(media, "a")], ["a-still-0000.png", "a-still-0007.png"])
+        self.assertEqual(stills(media, "*"), [])
+        self.assertEqual([p.name for p in stills(media, "[a]")], ["[a]-still-0001.png"])
 
 
 class ContactTimeRadiusTests(unittest.TestCase):
