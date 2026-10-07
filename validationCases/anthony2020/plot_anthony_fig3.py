@@ -55,13 +55,18 @@ def relative(ref: np.ndarray, xs: np.ndarray, ys: np.ndarray):
     return ref[k, 0], 100 * (np.interp(np.log(ref[k, 0]), np.log(xs), ys) / ref[k, 1] - 1)
 
 
-def load_run(folder: Path) -> dict:
-    """Neck history of a completed run folder, with its solver commit and R0 (the t = 0 row)."""
+BRANCH_OH = {"stokes": None, "oh0p6": 0.6}   # Oh recorded in the run manifest; None is Stokes
+
+
+def load_run(folder: Path, branch: str) -> dict:
+    """Neck history of a completed run folder of ``branch``, with its solver commit and R0 (the t = 0 row)."""
     path = folder / "neck.csv"
     summary = json.loads((folder / "summary.json").read_text())
     if summary["status"] != "reached_R_stop":
         raise SystemExit(f"{folder} did not reach R_stop: {summary['status']}")
     manifest = json.loads((folder / "run-manifest.json").read_text())
+    if manifest.get("Oh") != BRANCH_OH[branch]:
+        raise SystemExit(f"{folder} is a run at Oh = {manifest.get('Oh')}, not the {branch} branch")
     d = read_neck(path, extra=("two_H",))
     if d["t"][0] != 0.0:
         raise SystemExit(f"{folder}: the neck history must start with the initial bridge at t = 0")
@@ -116,9 +121,9 @@ def main() -> None:
     ref_r = published(files["radius"], "tau_v", "R_min")
     ref_u = published(files["velocity"], "R_min", "u_v")
     ref_k = published(files["curvature"], "R_min", "abs_two_H")
-    runs = {"stokes": load_run(a.stokes)}
+    runs = {"stokes": load_run(a.stokes, "stokes")}
     if a.finite is not None:
-        runs["oh0p6"] = load_run(a.finite)
+        runs["oh0p6"] = load_run(a.finite, "oh0p6")
     receipt = {"published_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files.values()},
                **{branch: compare(run, branch, ref_r, ref_u, ref_k) for branch, run in runs.items()}}
     a.out.parent.mkdir(parents=True, exist_ok=True)
