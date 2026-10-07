@@ -1,6 +1,6 @@
 """Run lists: which simulations an evidence case uses, and where their outputs live.
 
-Each evidence case keeps a ``runs.toml`` with one ``[[run]]`` table per simulation:
+A run list (``runs.toml``, kept outside the repository) has one ``[[run]]`` table per simulation:
 
     id           simulation identifier (the name of its directory under a data root)
     solver       "fem" or "bim"

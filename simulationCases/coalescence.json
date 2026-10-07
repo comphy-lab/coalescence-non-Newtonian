@@ -1,6 +1,6 @@
 {
   "schema": "pyoomph-case-v1",
-  "case_id": "T1-Oh0.6-R0-1e-03",
+  "case_id": "coalescence",
   "geometry": {
     "kind": "axisymmetric",
     "coordinates": [
@@ -12,9 +12,10 @@
   },
   "nondimensionalization": {
     "length": "R_drop",
-    "time": "sqrt(rho*R_drop^3/gamma)  (inertial-capillary, t_IC)",
+    "velocity": "gamma/mu",
+    "time": "mu*R_drop/gamma  (visco-capillary, as used by run_coalescence.py)",
     "pressure": "gamma/R_drop",
-    "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
+    "density": "1/Oh^2"
   },
   "physics": {
     "problem": "newtonian-drop-coalescence-free-surface",
@@ -68,8 +69,6 @@
     "note": "stop when the bridge reaches half the drop radius, or on reconnection (Duchemin et al. 2003), which the ALE algorithm cannot continue past"
   },
   "provenance": {
-    "tier": "T1",
-    "reproduces": "Fig. 3, Fig. 4",
-    "note": "Paulsen's ILV case. Must collapse onto T0 after rescaling tau_v = tau/Oh; no linear regime."
+    "note": "Default case: two equal drops coalescing at Oh = 0.6 from the approximate point-contact bridge R0 = 1e-3, Z0 = R0^2/2. Copy it and change physics.Oh (or set physics.inertia to false for Stokes) and physics.initial_bridge for other cases."
   }
 }

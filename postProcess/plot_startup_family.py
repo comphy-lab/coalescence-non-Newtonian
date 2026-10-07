@@ -12,8 +12,8 @@ smallest-R0 run at equal R_min, against R_min/R0. Every run must have reached R_
 No velocity offset or time shift is fitted in (a) or (c).
 
     python postProcess/plot_startup_family.py \
-        verificationCases/fem-startup-r0-independence/runs.toml \
-        --anthony validationCases/anthony2020-fig3-stokes/anthony2020-fig3-velocity-digitized.csv \
+        <run list> \
+        --anthony validationCases/anthony2020/data/anthony2020-fig3-velocity-digitized.csv \
         --out <output prefix>
 """
 

@@ -22,31 +22,23 @@ is the only physics beyond the Newtonian reference.
 
 ## Layout
 
-The repository follows the CoMPhy simulation layout: reusable code in one package,
-case definitions in `simulationCases/`, and evidence grouped by what the result is
-compared with.
-
 | Path | Contents |
 |---|---|
 | `src/coalescence/fem/` | The production solver: pyoomph finite elements on a tip-graded ALE mesh. |
-| `src/coalescence/bim/` | An independent axisymmetric boundary-integral Stokes solver (numpy and scipy only), used to verify the finite-element solver in the Stokes limit. |
-| `src/coalescence/analysis/` | Solver-agnostic code: neck-history readers, run lists and Stokes-regime theory. |
-| `run_fem_stokes_tip.py`, `run_bim_stokes.py` | Runners: one case file in, one output directory out. |
-| `simulationCases/anthony2020/` | The Newtonian case matrix of Anthony et al. (2020); see its README. |
-| `verificationCases/` | Code against code: the boundary-integral solver against the finite element, and convergence studies. |
-| `validationCases/` | Comparison with independent published data. |
-| `modelComparisonCases/` | Comparison with asymptotic theory in its stated regime. |
-| `postProcess/` | Scripts that rebuild each figure from run outputs. |
+| `src/coalescence/bim/` | An independent axisymmetric boundary-integral Stokes solver (numpy and scipy only). |
+| `src/coalescence/analysis/` | Solver-agnostic code: neck-history readers, contact time, run lists and Stokes-regime theory. |
+| `simulationCases/` | The coalescence entry point `run_coalescence.py` and its default case `coalescence.json`. |
+| `validationCases/anthony2020/` | Comparison with Anthony, Harris & Basaran (2020), Figure 3: the two cases, their run scripts, the digitised published data and the comparison plot. |
+| `verificationCases/bim-stokes/` | The boundary-integral runner, an independent solution of the Stokes case. |
+| `verificationCases/drop-oscillation/` | The inertial solver against the exact linear modes of a viscous drop. |
+| `postProcess/` | Analysis, figure and case-video scripts that work on run outputs. |
 | `testCases/` | Software tests. |
-| `docs/` | Approved documentation. |
 
 `fem` and `bim` never import each other and share only the case files, so agreement
-between them is a test of the numerics of each. Raw meshes, field histories and
-restart data remain outside this repository; approved documentation includes
-compact scalar plot inputs.
-Each evidence case lists its simulations in a `runs.toml` by identifier, commit and
-SHA-256 of the neck history; the figure scripts find the outputs through an
-untracked `data-roots.toml` (see `src/coalescence/analysis/runs.py`).
+between them is a test of the numerics of each. Simulation output stays outside this
+repository. A published figure states the solver commit and the pinned pyoomph version
+that produced it; reproducing it means rerunning the simulation with that commit and
+version.
 
 ## Method
 
@@ -72,18 +64,19 @@ implicit step or by backward Euler solved with a Jacobian-free Newton–Krylov m
 ## Running
 
 ```bash
-python run_fem_stokes_tip.py simulationCases/anthony2020/T5-stokes-R0-1e-06.json --out <output> [options]
-python run_bim_stokes.py simulationCases/anthony2020/T5-stokes-R0-1e-06.json --out <output> [--newton]
+python simulationCases/run_coalescence.py simulationCases/coalescence.json --out <output> [options]
+validationCases/anthony2020/run_stokes.sh <output>
+validationCases/anthony2020/run_oh0.6.sh <output>
+python verificationCases/bim-stokes/run_bim_stokes.py validationCases/anthony2020/T5-stokes-R0-1e-06.json --out <output> [--newton]
 python -m unittest discover -s testCases -t .
 ```
 
-The runners take the physics (R0, Z0, 1/Oh = 0) from the case file and every numerical
+The runners take the physics (Oh or Stokes, R0, Z0) from the case file and every numerical
 parameter, including the stop radius, from their options; each manifest lists the case
 fields used and records the full command line. A restart (`--restart-from`) writes to
-a new output directory, and the run list joins the segments with `continues`; a runner
-refuses to restart into a directory that already holds a run. The finite-element
-runner and its tests need the pinned pyoomph environment; the boundary-integral solver
-needs only numpy and scipy.
+a new output directory; a runner refuses to restart into a directory that already holds
+a run. The finite-element runner and its tests need the pinned pyoomph environment; the
+boundary-integral solver needs only numpy and scipy.
 
 Case videos: with `--field-frames` the finite-element runner saves the P2 velocity and
 pressure fields at the start, at every remesh and at every `--snapshot-dt`. The command
@@ -93,33 +86,3 @@ centred on the neck tip (the drop pair, the neck, the meniscus), each showing th
 and the viscous dissipation rate, on a clock that is logarithmic in time early and linear
 late. A Stokes run without saved fields is rebuilt from its saved interfaces, since its
 velocity is fixed by the geometry; an inertial run needs `--field-frames`.
-
-## Status
-
-The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 has been computed from
-their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03. It agrees
-with the published curve for R_min ≥ 10⁻⁴ but not during the startup transient; see
-[`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
-finite-Ohnesorge solver is verified against the exact linear modes of a viscous drop,
-the Stokes limit and its numerical choices at Oh = 0.6 (`verificationCases/`). At
-Oh = 0.6, the FEM agrees with Anthony et al. in the developed velocity range and
-shows a finite-inertia deficit of 6.5% at R_min = 10⁻⁵ and 12.2% at R_min = 0.03;
-an independent Stokes BIM reproduces the FEM startup to 0.243%. The complete
-validation record is [`docs/finite-oh-validation.md`](docs/finite-oh-validation.md),
-with a [compiled TeX report](docs/finite-oh-validation/finite-oh-validation-v4.pdf).
-The eight-radius Stokes family is complete; the finite-Oh endpoint radii agree
-within 0.042% beyond R_min = 0.003. Intermediate finite-Oh radii and the remaining
-mesh/remeshing partners are not yet computed.
-The Oh ladder needed to test the crossover at R_c approximately Oh remains open.
-The non-Newtonian problems are not yet computed.
-
-## Archived lines
-
-- `experiment/anthony-fig3-f9b408b` (tag `abandoned/anthony-fig3-f9b408b-2026-09-20`):
-  structured four-block Q2 chart with a lagged Eq. 6 divider constraint on an
-  unreleased pyoomph fork. Closed on 20 September 2026 without an accepted
-  trajectory; retained, locked, as the audit trail for its archived
-  diagnostics. Do not merge into `main`.
-- Tag `archive/structured-mapped-2026-09`: the structured and mapped-Q2
-  finite-element problem classes, runners and tests as they stood on `main`
-  before the move to `src/coalescence/`, superseded by the tip-graded solver.

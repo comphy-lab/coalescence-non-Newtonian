@@ -23,8 +23,8 @@ The clock, the colour limits and the protocol are those of ``render_hybrid_video
 
     python postProcess/render_case_dashboard_video.py <fields> [<fields> ...] \\
         --runtimes <runtime> [<continuation runtime> ...] --out dashboard.mp4 \\
-        [--anthony validationCases/anthony2020-fig3-stokes] \\
-        [--family verificationCases/fem-startup-r0-independence/runs.toml]
+        [--anthony validationCases/anthony2020/data] \\
+        [--family <run list of the initial-radius family>]
 """
 
 from __future__ import annotations

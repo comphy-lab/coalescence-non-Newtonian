@@ -42,7 +42,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "simulationCases"))
 
 
 def saved_frames(runtime: Path, states: str) -> list[int]:
@@ -67,7 +67,10 @@ def frame_list(spec: str | None, saved: list[int]) -> list[int]:
         return list(saved)
     if ":" in spec:
         lo, hi = (int(v) for v in spec.split(":"))
-        return [k for k in saved if lo <= k < hi]
+        frames = [k for k in saved if lo <= k < hi]
+        if not frames:
+            raise SystemExit(f"no saved frame in {lo}:{hi} (saved {saved[0]}..{saved[-1]})")
+        return frames
     frames = [int(v) for v in spec.split(",") if v.strip()]
     if any(k not in saved for k in frames):
         raise SystemExit(f"frames must be saved states ({saved[0]}..{saved[-1]})")
@@ -83,8 +86,8 @@ def state_file(runtime: Path, states: str, k: int) -> Path | None:
 
 def solve_one(runtime: Path, out: Path, k: int, states: str = "remesh") -> dict:
     """Frozen-geometry Stokes solve on the mesh built from saved state k (remesh k = 0: initial bridge)."""
-    import run_fem_stokes_tip as runner
-    from stokes_block_audit import seed_frozen_stokes
+    import run_coalescence as runner
+    from coalescence.fem.stokes_block_audit import seed_frozen_stokes
     from pyoomph.meshes.meshdatacache import MeshDataCache
 
     manifest = json.loads((runtime / "run-manifest.json").read_text())

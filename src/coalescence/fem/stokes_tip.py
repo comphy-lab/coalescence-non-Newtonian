@@ -1,9 +1,8 @@
 """Pure-Stokes (La = 0) coalescence on a tip-graded unstructured ALE mesh.
 
-Fresh solver route for the Anthony, Harris & Basaran (2020) T0 gate, written
-against the pinned public pyoomph release only.  It deliberately avoids the
-structured four-block chart, the algebraic Eq. 6 divider constraint and the
-private backend used by the earlier campaign.
+Solver route for the Anthony, Harris & Basaran (2020) Stokes cases, written against
+the pinned public pyoomph release only.  It deliberately avoids a structured
+four-block chart and an algebraic Eq. 6 divider constraint.
 
 Why this can be simple
 ----------------------
@@ -174,7 +173,7 @@ def fit_circle_kasa(points) -> tuple[tuple[float, float], float] | None:
     Q = P - x0  # centre the data for conditioning
     # ... and scale it to O(1): with a 5e-13 tip on a 1e-6 neck the centred coordinates are
     # ~1e-14 and the columns of A differ by 1e14, which lstsq's rank cut-off treats as
-    # rank deficient (R0=1e-6 run 41 read 4.3e-14 for an exactly circular 5e-13 tip).
+    # rank deficient (at R0=1e-6 an exactly circular 5e-13 tip was read as 4.3e-14).
     scale = float(np.abs(Q).max())
     if not (scale > 0.0) or not math.isfinite(scale):
         return None
@@ -317,8 +316,8 @@ class TipGradedQuadrantMesh(GmshTemplate):
         self.set_mesh_size_background_field(field)
 
 
-# Timing around Gmsh generation (a remesh at the R0=1e-6 asymptotic tip stalled silently for
-# 15+ minutes in runs 48 and 57 between define_geometry and the mesh load).
+# Timing around Gmsh generation (a remesh at the R0=1e-6 asymptotic tip can stall silently
+# for 15+ minutes between define_geometry and the mesh load).
 import pyoomph.meshes.gmsh as _pyoomph_gmsh_module
 
 _orig_generate_mesh_to_file = _pyoomph_gmsh_module.generate_mesh_to_file
@@ -341,7 +340,7 @@ class NeckFrameAxisymmetric(AxisymmetricCoordinateSystem):
     The mesh stores X = r - R_shift, with R_shift a global parameter (solver units) reset to
     the neck radius at every remesh.  In double precision the tip nodes then carry absolute
     errors of eps*|X| ~ eps*rho instead of eps*R_neck, which is what a tip radius twelve
-    decades below the neck radius (R0 = 1e-6) needs; see decision record 10-la0-restart §4j.
+    decades below the neck radius (R0 = 1e-6) needs.
     Only the places where the physical radius r enters are overridden: the 2 pi r measure,
     the error-estimation Jacobian and the hoop terms of vector gradient and divergence.
     Derivatives with respect to X equal those with respect to r.
@@ -447,7 +446,7 @@ class MappedTipMesh(GmshTemplate):
     Gmsh cannot build elements smaller than about 1e-12 of the model size, whatever the
     spatial scale (its Delaunay predicates are relative to the bounding box), and a
     Catmull-Rom spline joined to a tip arc kinks once the point spacing Gmsh can honour
-    exceeds the tip radius (R0=1e-4 dev runs 26-34).  Anthony et al. avoid both by
+    exceeds the tip radius (seen at R0=1e-4).  Anthony et al. avoid both by
     generating their structured mesh in stretched coordinates.  The same idea works for an
     unstructured mesh: every geometric input is mapped by the radial power law
 
@@ -483,10 +482,10 @@ class MappedTipMesh(GmshTemplate):
     # ---------------------------------------------------------------- the map
     # Composite radial map: exponent alpha inside the core d <= d_c (alpha = 1/2 makes the
     # mapped tip an exact parabola, which Gmsh's Catmull-Rom spline reproduces exactly; any
-    # other exponent misplaces the innermost nodes, run 52), exponent beta < alpha outside,
+    # other exponent misplaces the innermost nodes), exponent beta < alpha outside,
     # continuous at d_c.  The outer compression shrinks the mapped far field and with it the
-    # ratio of model size to mapped tip element that Gmsh must resolve (run 53: eleven decades
-    # at the asymptotic R0=1e-6 tip is beyond its floor; beta = 0.4 gains a factor 40).
+    # ratio of model size to mapped tip element that Gmsh must resolve (eleven decades at
+    # the asymptotic R0=1e-6 tip is beyond its floor; beta = 0.4 gains a factor 40).
     def _g(self, d: float) -> float:
         if self._linear_core_d > 0 and d <= self._linear_core_d:
             t = d / self._linear_core_d
@@ -736,7 +735,7 @@ class MappedTipMesh(GmshTemplate):
         # Double-precision floor.  Node coordinates near the tip carry an absolute error of
         # about eps*R_neck, so an interface element of size h on a tip of radius rho, whose
         # sagitta is h^2/(2 rho), is geometric noise unless h^2/(2 rho) >> eps R_neck.  Nodes
-        # closer to the tip than h_floor are not placed (R0=1e-6 run 42: control points at
+        # closer to the tip than h_floor are not placed (at R0=1e-6, control points at
         # 1e-21 of a 1e-6 neck gave a sign-flipping curvature and a Newton divergence).  At
         # R0=1e-4 the floor is 1e-15 against a smallest tip element of 4e-14 and never acts.
         eps = 2.2e-16
@@ -746,7 +745,7 @@ class MappedTipMesh(GmshTemplate):
         h_floor_phys = math.sqrt(2.0 * pb.tip_roundoff_factor * eps * coord_scale * rho * S)
         # Solve-accuracy floor: node positions are O(R_neck) unknowns whose converged error is a
         # fixed fraction of R_neck, so tip elements below tip_rel_floor * R_neck are moved by
-        # more than their size in one step (R0=1e-6 run 44: an element expanded 155x at
+        # more than their size in one step (at R0=1e-6 an element expanded 155x at
         # h = 7e-13 R_neck).  Zero disables it; 1e-11 leaves R0 >= 1e-4 untouched.
         h_floor_phys = max(h_floor_phys, pb.tip_rel_floor * r_neck_phys)
         h_floor_p = self._g(h_floor_phys / S)
@@ -820,7 +819,7 @@ class MappedTipMesh(GmshTemplate):
         self.set_gmsh_parameter("Mesh.Algorithm", 6)
         # Gmsh perturbs the boundary points of its 2D Delaunay by RandomFactor times the
         # model size (default 1e-9); with the mapped tip at 1e-11 of the model size that
-        # perturbation is the meshing floor (run 49: surface returned empty at 7e-12).
+        # perturbation is the meshing floor (the surface mesh came back empty at 7e-12).
         self.set_gmsh_parameter("Mesh.RandomFactor", pb.gmsh_random_factor)
 
         self._shift_s = 0.0          # geometry is already in frame coordinates
@@ -990,7 +989,7 @@ class StokesTipCoalescence(Problem):
         self.max_refine_rounds = int(max_refine_rounds)
         # Absolute element-size floor for bisection.  Below ~1e-13 in a unit domain the
         # assembled system loses too many digits and Newton diverges at any step size
-        # (R0=1e-4 dev runs: marginal at 1.5e-13, fatal at 3.7e-14).
+        # (at R0=1e-4: marginal at 1.5e-13, fatal at 3.7e-14).
         self.bisect_floor = float(bisect_floor)
         # pyoomph spatial scale: the solver stores coordinates as r/S.  With S = R0 the
         # tip elements are O(1e-9) in solver units instead of O(1e-13), which moves the
@@ -1000,7 +999,7 @@ class StokesTipCoalescence(Problem):
         self.interface_translation = bool(interface_translation)
         self.anticipation = float(anticipation)
         # Bisection depth below the Gmsh base mesh.  Seven or more levels diverged in every
-        # test (R0=1e-4 runs 21/22/24 at level 7; R0=1e-3 with a 1e-6 floor at 13 and 15);
+        # test (R0=1e-4 at level 7; R0=1e-3 with a 1e-6 floor at levels 13 and 15);
         # five was always stable.
         self.max_bisect_levels = int(max_bisect_levels)
         # Exponent of the tip-magnifying map used by MappedTipMesh; 0 selects the plain
@@ -1275,7 +1274,7 @@ class StokesTipCoalescence(Problem):
         )
         # Frame coordinate X (= r - R_shift in the neck frame): all tip-local geometry is done
         # in X; adding the shift first would round the tip away (eps R_neck ~ 2e-22 against
-        # innermost-chord sagittas ~1e-23 at a 1e-18 tip, runs 48-55).
+        # innermost-chord sagittas ~1e-23 at a 1e-18 tip).
         r = data.get_data("coordinate_x")
         z = data.get_data("coordinate_y")
         u = data.get_data("velocity_x")
@@ -1459,7 +1458,7 @@ class StokesTipCoalescence(Problem):
         # Neck node: on the plane z=0 with maximal r.
         # Plane nodes carry mesh_y = 0 exactly (Dirichlet).  Any finite tolerance fails on the
         # mapped R0=1e-4 mesh, whose first interface nodes above the plane sit at z ~ 3e-14
-        # (1e-14 and 1e-13 both picked one of them as the neck in runs 38 and 39).
+        # (tolerances of 1e-14 and 1e-13 both picked one of them as the neck).
         on_plane = [i for i in range(n) if abs(z[i]) <= 1e-30]
         i0 = max(on_plane, key=lambda i: r[i]) if on_plane else int(z.argmin())
         p0 = (float(r[i0]), float(z[i0]))
@@ -1472,11 +1471,11 @@ class StokesTipCoalescence(Problem):
         # Scale-free fit window: nodes whose chord from the neck makes an angle of at most
         # tip_fit_angle with the tip tangent (the z axis), i.e. about 2*tip_fit_angle of arc
         # on a circle, at least seven nodes.  A fixed node count spans a thousandth of a tip
-        # radius on the mapped mesh (run 36), and a window in lagged radii collapses once the
-        # tip radius grows again as R_min^3 (run 37: 5.6e-14 read for a 1.4e-12 tip).
+        # radius on the mapped mesh, and a window in lagged radii collapses once the
+        # tip radius grows again as R_min^3 (5.6e-14 was read for a 1.4e-12 tip).
         near = [i0]
         # Nodes within tip_apex_zone lagged radii of the apex carry position noise larger
-        # than their sagitta (R0=1e-6 run 61: ~1e-18 solver units against ~1e-23) and are
+        # than their sagitta (at R0=1e-6, ~1e-18 solver units against ~1e-23) and are
         # excluded from the fit.
         z_apex = self.tip_apex_zone * self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
         for i in order[1:]:
@@ -2058,7 +2057,7 @@ class StokesTipCoalescence(Problem):
                                globally_convergent_newton=self.line_search)
                     # The max-residual test is dominated by far-field rows whose weights exceed
                     # the tip rows by ~20 decades at R0=1e-6, so Newton stops with the tip
-                    # equations unconverged and a grid-scale wrinkle grows on the tip (run 58).
+                    # equations unconverged and a grid-scale wrinkle grows on the tip.
                     ok = True
                     break
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
