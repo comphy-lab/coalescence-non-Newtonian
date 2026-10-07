@@ -6,7 +6,8 @@ geometry at that instant. A moving-frame run saves the interface before every re
 (``restart/remesh_NNNN.npz``), so the full field at those times is recovered by
 building the mesh that followed the saved state, exactly as a restart does, and solving
 the frozen-geometry Stokes problem on it (the seed the run itself started from). Frame 0
-is the initial bridge of the case. With ``--states snapshots`` the frames are instead the
+is the initial bridge of the case; a restart continuation numbers its remesh states on from
+its parent's and has no frame 0. With ``--states snapshots`` the frames are instead the
 uniform-time interface snapshots (``snapshots/snap_NNNN.npz``, runner option
 ``--snapshot-dt``), frame k being snapshot k. Each frame is written as
 ``fields/frame-NNNN.npz``:
@@ -30,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -43,14 +45,32 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 
-def frame_list(spec: str, last: int) -> list[int]:
+def saved_frames(runtime: Path, states: str) -> list[int]:
+    """Frame numbers with a saved state, from the files present.
+
+    Snapshot k is frame k. Remesh state k is frame k, and frame 0 is the initial bridge of
+    the case; a restart continuation numbers its remesh states on from its parent's and
+    has no frame 0 of its own.
+    """
+    folder, stem = (runtime / "snapshots", "snap") if states == "snapshots" else (runtime / "restart", "remesh")
+    state = re.compile(stem + r"_(\d+)\.npz")
+    frames = sorted(int(m.group(1)) for p in folder.glob(f"{stem}_*.npz") if (m := state.fullmatch(p.name)))
+    if states == "snapshots":
+        return frames
+    manifest = json.loads((runtime / "run-manifest.json").read_text())
+    return frames if manifest.get("restart_from") else [0, *frames]
+
+
+def frame_list(spec: str | None, saved: list[int]) -> list[int]:
+    """The saved frames selected by ``lo:hi`` or a comma list; all of them by default."""
+    if spec is None:
+        return list(saved)
     if ":" in spec:
         lo, hi = (int(v) for v in spec.split(":"))
-        frames = list(range(lo, min(hi, last + 1)))
-    else:
-        frames = [int(v) for v in spec.split(",") if v.strip()]
-    if any(k < 0 or k > last for k in frames):
-        raise SystemExit(f"frames must lie in 0..{last}")
+        return [k for k in saved if lo <= k < hi]
+    frames = [int(v) for v in spec.split(",") if v.strip()]
+    if any(k not in saved for k in frames):
+        raise SystemExit(f"frames must be saved states ({saved[0]}..{saved[-1]})")
     return frames
 
 
@@ -120,7 +140,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runtime", type=Path, help="runtime folder holding run-manifest.json and restart/")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--frames", default=None, help="lo:hi or a comma list; default all saved states and frame 0")
+    ap.add_argument("--frames", default=None, help="lo:hi or a comma list of saved frames; default all of them")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--states", choices=("remesh", "snapshots"), default="remesh")
     ap.add_argument("--one", type=int, default=None, help=argparse.SUPPRESS)
@@ -130,13 +150,10 @@ def main() -> int:
     if a.one is not None:
         print(json.dumps(solve_one(runtime, out, a.one, a.states)), flush=True)
         return 0
-    if a.states == "snapshots":
-        last = len(list((runtime / "snapshots").glob("snap_*.npz"))) - 1
-        if last < 0:
-            raise SystemExit(f"{runtime}: no snapshots/snap_*.npz to rebuild (use --states remesh)")
-    else:
-        last = len(list((runtime / "restart").glob("remesh_*.npz")))
-    frames = frame_list(a.frames or f"0:{last + 1}", last)
+    saved = saved_frames(runtime, a.states)
+    if not saved:
+        raise SystemExit(f"{runtime}: no saved {a.states} states to rebuild")
+    frames = frame_list(a.frames, saved)
     out.mkdir(parents=True, exist_ok=True)
     (out / "logs").mkdir(exist_ok=True)
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
