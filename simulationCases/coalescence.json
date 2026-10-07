@@ -12,9 +12,10 @@
   },
   "nondimensionalization": {
     "length": "R_drop",
-    "time": "sqrt(rho*R_drop^3/gamma)  (inertial-capillary, t_IC)",
+    "velocity": "gamma/mu",
+    "time": "mu*R_drop/gamma  (visco-capillary, as used by run_coalescence.py)",
     "pressure": "gamma/R_drop",
-    "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
+    "density": "1/Oh^2"
   },
   "physics": {
     "problem": "newtonian-drop-coalescence-free-surface",
