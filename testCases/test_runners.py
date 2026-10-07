@@ -72,12 +72,16 @@ class Fig3ScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             (run / "summary.json").write_text('{"status": "reached_R_stop"}')
-            (run / "run-manifest.json").write_text(
-                '{"Oh": 0.6, "case_id": "c", "component_commit": "abc"}')
+            manifest = run / "run-manifest.json"
+            manifest.write_text('{"Oh": 0.6, "units": "visco-capillary", "case_id": "c", "component_commit": "abc"}')
             (run / "neck.csv").write_text("t,R_min,u_neck,tip_radius,two_H\n0.0,1e-6,0.0,5e-13,-2e12\n")
             self.assertEqual(fig3.load_run(run, "oh0p6")["R0"], 1e-6)
             with self.assertRaises(SystemExit):
                 fig3.load_run(run, "stokes")
+            for wrong in ('{"Oh": 0.3, "units": "visco-capillary"}', '{"Oh": 0.6, "units": "inertial-capillary"}'):
+                manifest.write_text(wrong)
+                with self.assertRaises(SystemExit):
+                    fig3.load_run(run, "oh0p6")
 
     def test_relative_refuses_a_non_increasing_abscissa(self) -> None:
         fig3 = load(ROOT / "validationCases" / "anthony2020" / "plot_anthony_fig3.py")

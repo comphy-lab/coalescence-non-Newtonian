@@ -67,6 +67,8 @@ def load_run(folder: Path, branch: str) -> dict:
     manifest = json.loads((folder / "run-manifest.json").read_text())
     if manifest.get("Oh") != BRANCH_OH[branch]:
         raise SystemExit(f"{folder} is a run at Oh = {manifest.get('Oh')}, not the {branch} branch")
+    if BRANCH_OH[branch] is not None and "visco-capillary" not in manifest.get("units", ""):
+        raise SystemExit(f"{folder}: a finite-Oh run must record visco-capillary units in its manifest")
     d = read_neck(path, extra=("two_H",))
     if d["t"][0] != 0.0:
         raise SystemExit(f"{folder}: the neck history must start with the initial bridge at t = 0")
