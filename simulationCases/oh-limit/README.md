@@ -7,3 +7,7 @@ test that the inertial solver recovers the Stokes solver as Oh → ∞
 ([`verificationCases/inertia-stokes-limit/`](../../verificationCases/inertia-stokes-limit/)).
 The finite-element runner works in visco-capillary units (length R, time μR/γ, density
 1/Oh²) and records them in each run manifest.
+
+The files are byte-identical to the inputs of the registered runs, whose manifests record
+their SHA-256, and are kept unedited for that reason. Their `provenance` block is
+inherited unchanged from the T3 case: these cases reproduce no published figure.

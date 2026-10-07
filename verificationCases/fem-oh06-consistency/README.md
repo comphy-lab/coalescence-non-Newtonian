@@ -15,9 +15,10 @@ frame with the production settings of the Stokes R0 = 10⁻⁶ run, started from
 the frozen-Stokes field as the first Newton iterate (`--stokes-first-guess`; from u = 0
 Newton diverges at this R0), to R_min = 0.03.
 
-**Results** (u_v/u_v,ref − 1 at equal R_min).
+**Results** (u_v/u_v,ref − 1 at equal R_min; R0 in the headings is that of the reference
+run, 10⁻³).
 
-| | range over 1.001–30 R0 | 2 R0 | 30 R0 |
+| | range over the shared R_min interval | R_min = 2 R0 | R_min = 30 R0 |
 |---|---|---|---|
 | moving neck frame | −0.044% … +0.042% | +0.030% | +0.042% |
 | single tip map | −0.045% … +0.012% | +0.0002% | +0.0008% |
