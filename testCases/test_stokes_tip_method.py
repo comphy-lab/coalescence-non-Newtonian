@@ -16,7 +16,7 @@ from coalescence.fem.stokes_tip import (
     StokesTipCoalescence, shallow_interface_refinement_points, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
-from stokes_block_audit import _json_safe, _solve_serial_block
+from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):

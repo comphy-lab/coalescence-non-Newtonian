@@ -1,4 +1,11 @@
-"""Run the La=0 tip-graded Stokes coalescence solver for one case file."""
+"""Coalescence of two equal drops: run the tip-graded finite-element solver for one case file.
+
+The case file supplies the physics (Stokes or finite Oh, initial bridge R0 and Z0); the
+options supply every numerical parameter and the stop radius. The default case is
+``simulationCases/coalescence.json``.
+
+    python simulationCases/run_coalescence.py simulationCases/coalescence.json --out <folder> [options]
+"""
 
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coalescence.fem.stokes_tip import StokesTipCoalescence  # noqa: E402
@@ -217,18 +224,18 @@ def main() -> int:
     pb = build_problem(args, bridge, Oh, restart)
     pb.quiet()
     if args.seed_frozen_stokes:
-        from stokes_block_audit import seed_frozen_stokes
+        from coalescence.fem.stokes_block_audit import seed_frozen_stokes
         pb.initialise()
         seed_frozen_stokes(pb, args.out, args.dt_initial)
     elif args.stokes_first_guess:
-        from stokes_block_audit import stokes_first_guess
+        from coalescence.fem.stokes_block_audit import stokes_first_guess
         pb.initialise()
         stokes_first_guess(pb, args.out, args.dt_initial)
     if args.audit_blocks:
         summary = pb.run_campaign(max_steps=1, max_wall_s=args.max_wall_s)
         if summary["steps"] != 1:
             return 1
-        from stokes_block_audit import audit_one_step
+        from coalescence.fem.stokes_block_audit import audit_one_step
         audit_one_step(pb, args.out, args.audit_dt)
         return 0
     summary = pb.run_campaign(max_steps=args.max_steps, max_wall_s=args.max_wall_s)
