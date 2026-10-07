@@ -46,7 +46,7 @@ def rebuild_stokes(runtime: Path, out: Path, python: str, workers: int) -> Path:
     if manifest.get("Oh") is not None:
         raise SystemExit(f"{runtime}: inertial run without fields/; its velocity carries history and "
                          "cannot be rebuilt from the interface (rerun with --field-frames)")
-    states = "snapshots" if (runtime / "snapshots").is_dir() else "remesh"
+    states = "snapshots" if any((runtime / "snapshots").glob("snap_*.npz")) else "remesh"
     cmd = [python, str(HERE / "reconstruct_stokes_fields.py"), str(runtime), "--out", str(out),
            "--states", states, "--workers", str(workers)]
     print("rebuilding:", " ".join(cmd[1:]), flush=True)
@@ -109,6 +109,8 @@ def main() -> int:
         folders.append(folder)
         sources.append({"runtime": str(rt), "fields": str(folder), "origin": "run" if own else "rebuilt-stokes"})
     video = out / "media" / f"{a.name}.mp4"
+    for old in (out / "media").glob(f"{a.name}-still-*.png"):
+        old.unlink()                                  # stills of an earlier render under this name
     cmd = [sys.executable, str(HERE / "render_hybrid_video.py"), *map(str, folders), "--out", str(video),
            "--workers", str(a.workers), "--duration", str(a.duration), "--t-switch", str(a.t_switch),
            "--stills", "0,0.5,1"]
@@ -121,11 +123,13 @@ def main() -> int:
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
                            capture_output=True, text=True).stdout.strip()
+    # Only the outputs of this render: media/ may also hold earlier renders under other names.
+    outputs = [video, grid, *sorted((out / "media").glob(f"{a.name}-still-*.png"))]
     manifest = {"schema": "case-video-v1", "component_commit": commit + ("-dirty" if dirty else ""),
                 "sources": sources, "video": str(video), "qa_grid": str(grid), "encode": info,
                 "settings": {"duration_s": a.duration, "t_switch": a.t_switch,
                              "windows": "ell_b = min(R_min, 0.7), ell_c = min(6 rho, ell_b/10), tip-centred"},
-                "sha256": {p.name: sha256(p) for p in sorted((out / "media").glob("*")) if p.is_file()}}
+                "sha256": {p.name: sha256(p) for p in outputs}}
     (out / "media" / f"{a.name}-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
     print(json.dumps({"video": str(video), "qa_grid": str(grid), "encode": info}, indent=1), flush=True)
     return 0
