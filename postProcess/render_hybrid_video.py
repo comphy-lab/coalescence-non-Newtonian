@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Hybrid coalescence video: the whole drop pair, the neck and the meniscus in one frame.
+
+Input is one or more frame folders written by ``reconstruct_stokes_fields.py``, in time
+order, for example the remesh states of a startup run followed by the uniform-time
+snapshots of its continuation. Frames that do not advance the time are dropped, so a
+restart state present in both folders is drawn once. A continuation that restarts before
+the last frame of the earlier folders is refused.
+
+Three panels per frame share one (t, R_min, rho) stamp. They are successive zooms on the
+neck tip: the window of each zoomed panel is a square centred on the tip, of half-width
+ell, and is marked in the previous panel by a dashed box once that box is larger than a
+pixel. The half-widths are
+
+    ell_b = min(R_min, 0.7),   ell_c = min(6 rho, ell_b / 10),
+
+so (b) is the neck window [0, 2 R_min] x [-R_min, R_min] until R_min reaches a third of the
+height of (a), and (c) is the meniscus window (six tip radii) until the tip radius, which
+grows like R_min^3, would make (c) less than ten times magnified from (b). The nesting
+never inverts.
+
+* **(a) the pair** at a fixed physical scale (as ``render_drop_pair_video.py``): the speed
+  |u| left of the axis and log10 Phi right, both drops shown.
+* **(b) the neck**: (r - R_min, z)/ell_b; |u| in the upper drop and log10(Phi ell_b^2) in
+  the lower one.
+* **(c) the meniscus**, comoving with the tip: (r - R_min, z)/ell_c; the speed relative to
+  the advancing neck, |u - U e_r|, above the plane and log10(Phi ell_c^2) below.
+
+The dashed line inside the liquid of every panel is the symmetry plane z = 0 (the axis
+r = 0 in (a)), where the speed half meets the dissipation half.
+
+Playback follows a warped clock, s = ln t for t < t_s and s = ln t_s + (t - t_s)/t_s beyond
+(continuous in value and slope): the startup is shown on a logarithmic clock, slowly, and
+the late stage on a linear one. Each saved state is held on screen for its share of s
+(sample and hold at a constant output rate); states are never interpolated or blended, and
+the stamp always shows the physical time of the state drawn.
+
+Phi = 2 mu E:E with the hoop strain, from the P2 velocity gradient in neck-frame
+coordinates (``render_neck_video.py``). Visco-capillary units. The protocol is that of the
+two single-scale renderers: fixed windows, ticks, figure size and colour limits
+(area-weighted samples of a spread of frames), numeric gapless frame order, uniform frame
+size before encoding, mathtext, and no text on the frames beyond labels, panel tags and the
+stamp.
+
+    python postProcess/render_hybrid_video.py <fields> [<fields> ...] --out hybrid.mp4
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from functools import partial
+from multiprocessing import Pool
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import matplotlib.pyplot as plt  # noqa: E402  (backend and fonts set by render_neck_video)
+import numpy as np  # noqa: E402
+from matplotlib.patches import Rectangle  # noqa: E402
+from matplotlib.tri import LinearTriInterpolator, Triangulation  # noqa: E402
+
+import render_drop_pair_video as pair  # noqa: E402
+from render_neck_video import (  # noqa: E402
+    _SUBTRIS, CMAP_DISS, CMAP_SPEED, DECADES, FS_CBAR_LABEL, FS_CBAR_TICK, FS_LABEL, FS_TICK, FS_TITLE,
+    Frame, interface_chain, load_frame, png_size, read_series, sci, strain_fields,
+)
+
+LB_CAP = 0.7            # (b) half-width cap: a third of the half-height of (a)
+ZOOM_C = 10.0           # (c) is at least this many times magnified from (b)
+MEN_TIPS = 6.0          # (c) half-width in tip radii while the tip is small
+BOX_STYLE = dict(fill=False, ls=(0, (4, 3)), lw=1.4, ec="0.2", zorder=8)
+BOX_MIN = 0.01          # draw a box once its side exceeds this fraction of the panel
+
+
+def zoom_scales(fr: Frame) -> tuple[float, float]:
+    """Half-widths of the (b) and (c) windows, both centred on the neck tip."""
+    lb = min(fr.R_min, LB_CAP)
+    return lb, min(MEN_TIPS * fr.rho, lb / ZOOM_C)
+
+
+def collect(folders: list[Path]) -> list[Path]:
+    """Frame files of all folders in order, keeping only frames that advance the time.
+
+    Each later folder continues the run of the earlier ones from a restart. A continuation
+    whose first frame after t = 0 (a rebuilt folder repeats the initial bridge as its frame 0)
+    precedes the last frame already collected is refused: the earlier run's frames beyond the
+    restart would show a different trajectory from the neck history, which switches to the
+    continuation at the restart time.
+    """
+    out, last = [], -np.inf
+    for folder in folders:
+        stamped = []
+        for path in read_series(folder.resolve()):
+            with np.load(path) as d:
+                stamped.append((path, float(d["t"])))
+        start = next((t for _, t in stamped if t > 0.0), None)
+        if out and start is not None and start < last * (1 - 1e-12):
+            raise SystemExit(f"{folder}: the continuation starts at t = {start:.6e}, before the last frame of the "
+                             f"earlier folders (t = {last:.6e}); restart from the last saved state, or render the "
+                             "runs separately")
+        for path, t in stamped:
+            if t > last * (1 + 1e-12) or (t == 0.0 and not out):
+                out.append(path)
+                last = t
+    return out
+
+
+def warped_clock(t: np.ndarray, t_switch: float) -> np.ndarray:
+    """s(t) = ln t below t_switch, continued linearly with the same slope above it."""
+    t = np.asarray(t, dtype=float)
+    return np.where(t < t_switch, np.log(np.maximum(t, 1e-300)), np.log(t_switch) + (t - t_switch) / t_switch)
+
+
+def playback_sequence(times: np.ndarray, t_switch: float, duration: float, fps: int, hold_first: float) -> np.ndarray:
+    """Source frame shown at each output frame: sample and hold on the warped clock.
+
+    Frame 0 (t = 0, where ln t is undefined) is held for ``hold_first`` seconds; the rest of
+    the duration spans s(t_1) .. s(t_last) uniformly.
+    """
+    s = warped_clock(times[1:], t_switch)
+    n_first = int(round(hold_first * fps))
+    n_rest = int(round((duration - hold_first) * fps))
+    clock = np.linspace(s[0], s[-1], n_rest)
+    rest = 1 + np.searchsorted(s, clock, side="right") - 1
+    return np.concatenate([np.zeros(n_first, dtype=int), np.clip(rest, 1, len(times) - 1)])
+
+
+def check_playback(times: np.ndarray, duration: float, hold_first: float, fps: int) -> None:
+    """Refuse, before any frame is rendered, inputs from which no playback sequence can be built."""
+    if len(times) < 2:
+        raise SystemExit("a video needs at least two frames (t = 0 and one later state)")
+    if hold_first < 0:
+        raise SystemExit("--hold-first must not be negative")
+    if round((duration - hold_first) * fps) < 1:
+        raise SystemExit("--duration must exceed --hold-first by at least one output frame")
+
+
+def link_sequence(seq: np.ndarray, frames_dir: Path, seq_dir: Path) -> None:
+    """Gapless numbered links seq-NNNNN.png -> the held frame-NNNNN.png, for ffmpeg.
+
+    The targets are absolute: a relative target would resolve against ``seq_dir``, not the
+    working directory, and every link would dangle when ``--out`` is relative.
+    """
+    if seq_dir.is_dir():
+        for old in seq_dir.glob("seq-*.png"):
+            old.unlink()
+    seq_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = frames_dir.resolve()
+    for j, k in enumerate(seq):
+        (seq_dir / f"seq-{j:05d}.png").symlink_to(frames_dir / f"frame-{int(k):05d}.png")
+
+
+def fmt(v: float) -> str:
+    return f"{v:.3f}" if 1e-2 <= abs(v) < 10 else ("0" if v == 0 else sci(v))
+
+
+# ---------------------------------------------------------------- zoom panels
+
+def zoom_coords(fr: Frame, ell: float) -> tuple[np.ndarray, np.ndarray]:
+    """(r - R_min, z)/ell from the solver's X = r - R_neck, so the tip keeps its digits."""
+    return fr.points[:, 0] / ell, fr.points[:, 1] / ell
+
+
+def window_tris(x: np.ndarray, y: np.ndarray, fr: Frame, sign_y: float) -> Triangulation | None:
+    """Sub-triangles near the window [-1, 1]^2; sub-pixel slivers of the tip cluster dropped."""
+    tris = fr.cells[:, _SUBTRIS].reshape(-1, 3)
+    near = np.any((np.abs(x[tris]) <= 1.05) & (y[tris] <= 1.05), axis=1)
+    tris = tris[near]
+    if not len(tris):
+        return None
+    x0, y0 = x[tris[:, 0]], y[tris[:, 0]]
+    area = 0.5 * np.abs((x[tris[:, 1]] - x0) * (y[tris[:, 2]] - y0) - (x[tris[:, 2]] - x0) * (y[tris[:, 1]] - y0))
+    tris = tris[area > 4e-18]
+    return Triangulation(x, sign_y * y, tris) if len(tris) else None
+
+
+def zoom_fields(fr: Frame, phi: np.ndarray, ell: float, relative: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Upper field (|u|, or |u - U e_r| comoving with the tip) and log10(Phi ell^2)."""
+    up = np.hypot(fr.velocity[:, 0] - (fr.U if relative else 0.0), fr.velocity[:, 1])
+    return up, np.log10(np.maximum(phi * ell ** 2, 1e-300))
+
+
+# ------------------------------------------------------------------- drawing
+
+@dataclass(frozen=True)
+class Layout:
+    fig_w: float
+    fig_h: float
+    rects: tuple[tuple[float, float, float, float], ...]
+    dpi: int
+    limits: dict[str, dict[str, float]]
+
+
+def make_layout(limits: dict[str, dict[str, float]], dpi: int, panel_h: float = 5.2) -> Layout:
+    widths = (panel_h * pair.R_LIM / pair.Z_LIM, panel_h, panel_h)
+    left, cbar, gap, bottom, top = 0.95, 1.95, 0.45, 0.95, 1.15
+    fig_w = left + sum(widths) + 3 * cbar + 2 * gap
+    fig_h = bottom + panel_h + top
+    x0, rects = left, []
+    for w in widths:
+        rects.append((x0 / fig_w, bottom / fig_h, w / fig_w, panel_h / fig_h))
+        x0 += w + cbar + gap
+    return Layout(fig_w, fig_h, tuple(rects), dpi, limits)
+
+
+def style_axes(ax, xlabel: str, ylabel: str, tag: str) -> None:
+    ax.set_xlabel(xlabel, fontsize=FS_LABEL, labelpad=4)
+    ax.set_ylabel(ylabel, fontsize=FS_LABEL, labelpad=4)
+    ax.tick_params(which="both", direction="out", width=1.2, labelsize=FS_TICK, pad=4)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+    ax.text(0.0, 1.02, tag, transform=ax.transAxes, ha="left", va="bottom", fontsize=FS_LABEL)
+
+
+def colourbars(fig, lay: Layout, rect, lim: dict[str, float], upper_label: str, lower_label: str) -> None:
+    x0, y0, w, h = rect
+    cw, off = 0.20 / lay.fig_w, 0.22 / lay.fig_w
+    cax_u = fig.add_axes([x0 + w + off, y0 + 0.52 * h, cw, 0.46 * h])
+    cax_l = fig.add_axes([x0 + w + off, y0 + 0.02 * h, cw, 0.46 * h])
+    cb_u = fig.colorbar(plt.cm.ScalarMappable(cmap=CMAP_SPEED, norm=plt.Normalize(0.0, lim["vmax"])), cax=cax_u)
+    cb_l = fig.colorbar(plt.cm.ScalarMappable(cmap=CMAP_DISS, norm=plt.Normalize(lim["dmin"], lim["dmax"])), cax=cax_l)
+    cb_u.set_label(upper_label, fontsize=FS_CBAR_LABEL, labelpad=6)
+    cb_l.set_label(lower_label, fontsize=FS_CBAR_LABEL, labelpad=6)
+    for cb in (cb_u, cb_l):
+        cb.ax.tick_params(labelsize=FS_CBAR_TICK)
+
+
+def draw_panels(fig, fr: Frame, lay: Layout) -> None:
+    """The three nested panels (a)-(c) and their colour bars, into ``lay.rects`` of ``fig``."""
+    phi = strain_fields(fr)["phi"]
+    log_phi = np.log10(np.maximum(phi, 1e-300))
+    chain = interface_chain(fr)
+    r_c = fr.points[chain, 0] + fr.shift
+    z_c = fr.points[chain, 1]
+
+    # (a) the pair, fixed physical scale
+    lim = lay.limits["pair"]
+    ax = fig.add_axes(lay.rects[0])
+    sp = np.hypot(fr.velocity[:, 0], fr.velocity[:, 1])
+    for sz in (1.0, -1.0):
+        ax.tripcolor(pair.quadrant_triangulation(fr, -1.0, sz), sp, shading="gouraud", cmap=CMAP_SPEED,
+                     vmin=0.0, vmax=lim["vmax"], rasterized=True)
+        ax.tripcolor(pair.quadrant_triangulation(fr, 1.0, sz), log_phi, shading="gouraud", cmap=CMAP_DISS,
+                     vmin=lim["dmin"], vmax=lim["dmax"], rasterized=True)
+    for sx in (1.0, -1.0):
+        for sz in (1.0, -1.0):
+            ax.plot(sx * r_c, sz * z_c, color="black", lw=1.4, zorder=6)
+    ax.axvline(0.0, color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
+    lb, lc = zoom_scales(fr)
+    if 2.0 * lb > BOX_MIN * 2.0 * pair.Z_LIM:
+        ax.add_patch(Rectangle((fr.R_min - lb, -lb), 2.0 * lb, 2.0 * lb, **BOX_STYLE))
+    ax.set_xlim(-pair.R_LIM, pair.R_LIM)
+    ax.set_ylim(-pair.Z_LIM, pair.Z_LIM)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks(np.arange(-1.5, 1.5 + 1e-9, 0.5))
+    ax.set_xticklabels(["", "-1", "", "0", "", "1", ""])
+    ax.set_yticks(np.arange(-2.0, 2.0 + 1e-9, 1.0))
+    style_axes(ax, r"$r$", r"$z$", "(a)")
+    colourbars(fig, lay, lay.rects[0], lim, r"$|\mathbf{u}|$  (left)", r"$\log_{10}\Phi$  (right)")
+
+    # (b) and (c): successive zooms centred on the tip
+    panels = (("neck", lb, lc, False, "b", r"$|\mathbf{u}|$"),
+              ("meniscus", lc, None, True, "c", r"$|\mathbf{u}-U\mathbf{e}_r|$"))
+    for rect, (key, ell, ell_next, relative, tag, upper_label) in zip(lay.rects[1:], panels):
+        lim = lay.limits[key]
+        ax = fig.add_axes(rect)
+        x, y = zoom_coords(fr, ell)
+        up, lo = zoom_fields(fr, phi, ell, relative)
+        tri_u, tri_l = window_tris(x, y, fr, 1.0), window_tris(x, y, fr, -1.0)
+        if tri_u is not None:
+            ax.tripcolor(tri_u, up, shading="gouraud", cmap=CMAP_SPEED, vmin=0.0, vmax=lim["vmax"], rasterized=True)
+        if tri_l is not None:
+            ax.tripcolor(tri_l, lo, shading="gouraud", cmap=CMAP_DISS, vmin=lim["dmin"], vmax=lim["dmax"],
+                         rasterized=True)
+        ax.plot(x[chain], y[chain], color="black", lw=1.6, zorder=6)
+        ax.plot(x[chain], -y[chain], color="black", lw=1.6, zorder=6)
+        ax.plot([-1.0, 0.0], [0.0, 0.0], color="grey", lw=0.7, ls=(0, (6, 6)), zorder=5)
+        if ell_next is not None and 2.0 * ell_next / ell > BOX_MIN * 2.0:
+            h = ell_next / ell
+            ax.add_patch(Rectangle((-h, -h), 2.0 * h, 2.0 * h, **BOX_STYLE))
+        ax.set_xlim(-1.0, 1.0)
+        ax.set_ylim(-1.0, 1.0)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xticks(np.arange(-1.0, 1.0 + 1e-9, 0.5))
+        ax.set_yticks(np.arange(-1.0, 1.0 + 1e-9, 0.5))
+        style_axes(ax, rf"$(r-R_{{\min}})/\ell_{tag}$", rf"$z/\ell_{tag}$",
+                   rf"({tag})   $\ell_{tag} = {fmt(ell)}$")
+        colourbars(fig, lay, rect, lim, upper_label, rf"$\log_{{10}}(\Phi\,\ell_{tag}^2)$")
+
+
+
+def draw_stamp(fig, fr: Frame, fig_h: float) -> None:
+    fig.text(0.5, 1.0 - 0.42 / fig_h,
+             rf"$t = {fmt(fr.t)}$,   $R_{{\min}} = {fmt(fr.R_min)}$,   $\rho = {fmt(fr.rho)}$",
+             ha="center", va="center", fontsize=FS_TITLE)
+
+
+def draw_frame(fr: Frame, lay: Layout, dest: Path) -> Path:
+    fig = plt.figure(figsize=(lay.fig_w, lay.fig_h))
+    draw_panels(fig, fr, lay)
+    draw_stamp(fig, fr, lay.fig_h)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(dest, dpi=lay.dpi)
+    plt.close(fig)
+    return dest
+
+
+def _render_one(item: tuple[int, str], lay: Layout, outdir: str) -> str | None:
+    index, path = item
+    try:
+        return str(draw_frame(load_frame(index, Path(path)), lay, Path(outdir) / f"frame-{index:05d}.png"))
+    except Exception as exc:  # noqa: BLE001 - one bad frame is counted, not fatal to the pool
+        print(f"  frame {index} failed: {exc}", file=sys.stderr)
+        return None
+
+
+# ------------------------------------------------------------ colour limits
+
+def colour_limits(files: list[Path], n_probe: int = 16) -> dict[str, dict[str, float]]:
+    """Per panel: 99.8th percentiles of area-weighted samples (uniform grids over the upper half of
+    each window) of a spread of frames; dissipation over DECADES below its maximum."""
+    probes = [load_frame(int(i), files[int(i)])
+              for i in np.unique(np.linspace(0, len(files) - 1, min(n_probe, len(files))).astype(int))]
+    zoom_grid = np.meshgrid(np.linspace(-1.0, 1.0, 241), np.linspace(0.0, 1.0, 121))
+    grids = {
+        "pair": np.meshgrid(np.linspace(0.0, pair.R_LIM, 161), np.linspace(0.0, pair.Z_LIM, 211)),
+        "neck": zoom_grid,
+        "meniscus": zoom_grid,
+    }
+    samples = {k: ([], []) for k in grids}
+    for fr in probes:
+        phi = strain_fields(fr)["phi"]
+        fields = {"pair": (pair.quadrant_triangulation(fr, 1.0, 1.0), np.hypot(*fr.velocity.T),
+                           np.log10(np.maximum(phi, 1e-300)))}
+        for key, ell, relative in zip(("neck", "meniscus"), zoom_scales(fr), (False, True)):
+            x, y = zoom_coords(fr, ell)
+            tri = window_tris(x, y, fr, 1.0)
+            if tri is not None:
+                fields[key] = (tri, *zoom_fields(fr, phi, ell, relative))
+        for k, (tri, up, lo) in fields.items():
+            gx, gy = grids[k]
+            su = LinearTriInterpolator(tri, up)(gx, gy).compressed()
+            sl = LinearTriInterpolator(tri, lo)(gx, gy).compressed()
+            if su.size:
+                samples[k][0].append(np.percentile(su, 99.8))
+                samples[k][1].append(np.percentile(sl, 99.8))
+    out = {}
+    for k, (speeds, highs) in samples.items():
+        dmax = float(np.ceil(2.0 * max(highs)) / 2.0)
+        out[k] = {"vmax": float(np.ceil(10.0 * max(speeds)) / 10.0), "dmin": dmax - DECADES, "dmax": dmax}
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("fields", type=Path, nargs="+", help="frame folders in time order")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--stills", type=str, default="0.5", help="comma list of frame fractions for stills")
+    ap.add_argument("--stills-only", action="store_true")
+    ap.add_argument("--fps", type=int, default=30, help="output frame rate")
+    ap.add_argument("--duration", type=float, default=32.0, help="video length in seconds")
+    ap.add_argument("--t-switch", type=float, default=0.05, help="time at which the clock turns from logarithmic to linear")
+    ap.add_argument("--hold-first", type=float, default=0.6, help="seconds the t = 0 frame is shown")
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--dpi", type=int, default=100)
+    a = ap.parse_args(argv)
+    files = collect(a.fields)
+    times = np.array([float(np.load(f)["t"]) for f in files])
+    if times[0] != 0.0 or np.any(np.diff(times) <= 0):
+        raise SystemExit("frames must start at t = 0 and advance in time")
+    if not a.stills_only:
+        check_playback(times, a.duration, a.hold_first, a.fps)
+    limits = colour_limits(files)
+    print(f"{len(files)} frames from {len(a.fields)} folders", flush=True)
+    for k, lim in limits.items():
+        print(f"  colour limits {k}: speed 0 -> {lim['vmax']:.3g}; log dissipation {lim['dmin']:.3g} -> {lim['dmax']:.3g}",
+              flush=True)
+    lay = make_layout(limits, a.dpi)
+    for frac in (float(v) for v in a.stills.split(",") if v.strip()):
+        i = min(len(files) - 1, int(round(frac * (len(files) - 1))))
+        dest = a.out.parent / f"{a.out.stem}-still-{i:04d}.png"
+        print(f"wrote {draw_frame(load_frame(i, files[i]), lay, dest)}", flush=True)
+    if a.stills_only:
+        return 0
+    frames_dir = a.out.parent / f"{a.out.stem}-frames"
+    if frames_dir.is_dir():
+        for old in frames_dir.glob("frame-*.png"):
+            old.unlink()
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    items = [(i, str(p)) for i, p in enumerate(files)]
+    with Pool(a.workers) as pool:
+        made = [Path(m) for m in pool.map(partial(_render_one, lay=lay, outdir=str(frames_dir)), items) if m]
+    print(f"rendered {len(made)} of {len(items)} frames", flush=True)
+    if len(made) != len(items):
+        raise SystemExit("frame numbering would have gaps; ffmpeg would silently truncate the video")
+    sizes = {png_size(p) for p in made}
+    if len(sizes) != 1:
+        raise SystemExit(f"frame sizes are not uniform: {sorted(sizes)}")
+    # Playback on the warped clock: a gapless numbered sequence of links to the held frames.
+    seq = playback_sequence(times, a.t_switch, a.duration, a.fps, a.hold_first)
+    seq_dir = a.out.parent / f"{a.out.stem}-sequence"
+    link_sequence(seq, frames_dir, seq_dir)
+    held = np.bincount(seq, minlength=len(files)) / a.fps
+    shown = np.count_nonzero(held)
+    print(f"playback: {len(seq)} output frames; {shown} of {len(files)} states shown; longest hold "
+          f"{held.max():.2f} s (state {int(held.argmax())}, t = {times[int(held.argmax())]:.3e})", flush=True)
+    encode = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(a.fps),
+              "-i", str(seq_dir / "seq-%05d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+              "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", str(a.out)]
+    if shutil.which("ffmpeg") is None:
+        print("ffmpeg is not on PATH; encode with:\n  " + " ".join(encode), file=sys.stderr)
+        return 2
+    if subprocess.run(encode, check=False).returncode != 0:
+        raise SystemExit("ffmpeg failed")
+    print(f"wrote {a.out} ({a.out.stat().st_size / 1e6:.2f} MB, {len(seq)} frames at {a.fps} fps "
+          f"= {len(seq) / a.fps:.1f} s)", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

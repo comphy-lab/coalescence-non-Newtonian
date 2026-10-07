@@ -147,6 +147,32 @@ def seed_frozen_stokes(problem, output_dir: Path, initial_dt: float) -> dict:
     return result
 
 
+def stokes_first_guess(problem, output_dir: Path, initial_dt: float) -> dict:
+    """Frozen-Stokes fields as the first Newton iterate of an inertial run that starts from rest.
+
+    The seed is solved exactly as on the Stokes route, kept aside, and the fluid unknowns are
+    returned to rest before the history is made impulsive: the initial condition stays u = 0
+    and only the starting point of the first time step's Newton iteration changes (the
+    converged step does not depend on it). From u = 0 the first residual is set by the
+    initial capillary pressure 1/Z0 and Newton diverges at R0 = 1e-6 whatever the step.
+    """
+    result = seed_frozen_stokes(problem, output_dir, initial_dt)
+    fluid, _, _, _ = _field_indices(problem)
+    U = np.asarray(problem.get_current_dofs()[0], dtype=np.float64).copy()
+    rest = U.copy()
+    rest[fluid] = 0.0
+    problem.set_current_dofs(rest)
+    problem.invalidate_cached_mesh_data()
+    problem.assign_initial_values_impulsive()
+    problem.timestepper.set_num_unsteady_steps_done(0)
+    problem._taken_already_an_unsteady_step = False
+    problem._dt_prev = None
+    problem._first_newton_guess = (fluid, U[fluid].copy())
+    result["used_as"] = "first Newton iterate; initial condition u = 0"
+    (output_dir / "seed-stokes.json").write_text(json.dumps(_json_safe(result), indent=2, allow_nan=False) + "\n")
+    return result
+
+
 def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
     """Apply one frozen-Stokes correction, then one complementary correction."""
     if problem._steps != 1 or problem.n_remesh != 0 or audit_dt <= 0:

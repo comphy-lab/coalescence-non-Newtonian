@@ -17,6 +17,8 @@ from coalescence.fem.stokes_tip import StokesTipCoalescence  # noqa: E402
 
 # The case supplies the physics; numerical parameters and the stop radius come from the options.
 CASE_FIELDS_USED = ["schema", "physics.inertia", "physics.initial_bridge.R0", "physics.initial_bridge.Z0"]
+INERTIAL_FIELDS_USED = ["physics.Oh", "physics.initial_velocity"]
+UNITS = "visco-capillary: length R, velocity gamma/mu, time mu R/gamma, pressure gamma/R; density 1/Oh^2"
 
 
 def component_commit() -> str:
@@ -31,8 +33,8 @@ def component_commit() -> str:
     return commit + ("-dirty" if dirty else "")
 
 def exit_status(summary: dict) -> int:
-    """0 only for a run that reached its stop radius; any other ending is a non-zero exit."""
-    return 0 if summary["status"] == "reached_R_stop" else 1
+    """0 only for a run that reached its stop radius or stop time; any other ending is a non-zero exit."""
+    return 0 if summary["status"] in ("reached_R_stop", "reached_t_stop") else 1
 
 
 def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
@@ -48,7 +50,7 @@ def write_manifest(out: Path, manifest: dict, stem: str) -> Path:
     raise SystemExit(f"no free manifest name for {stem} in {out}")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("case", type=Path)
     ap.add_argument("--out", type=Path, required=True)
@@ -60,6 +62,9 @@ def main() -> int:
     ap.add_argument("--remesh-growth", type=float, default=1.5)
     ap.add_argument("--newton-tol", type=float, default=None, help="default 1e-7*(5e-7/Z0): the max-residual roundoff floor scales with the initial capillary pressure 1/Z0")
     ap.add_argument("--r-stop", type=float, default=0.03)
+    ap.add_argument("--t-stop", type=float, default=None, help="also stop once t reaches this time")
+    ap.add_argument("--snapshot-dt", type=float, default=None, help="moving frame: save the interface in the restart format every this much time")
+    ap.add_argument("--field-frames", action="store_true", help="save the full P2 fields at the start, at every remesh and every --snapshot-dt (for make_case_video.py)")
     ap.add_argument("--max-steps", type=int, default=100000)
     ap.add_argument("--max-wall-s", type=float, default=None)
     ap.add_argument("--no-neck-stretch", action="store_true")
@@ -78,6 +83,8 @@ def main() -> int:
     ap.add_argument("--audit-blocks", action="store_true", help="stop after one accepted step and audit frozen Stokes and complement Jacobian blocks")
     ap.add_argument("--audit-dt", type=float, default=None, help="fixed BDF1 timestep for --audit-blocks")
     ap.add_argument("--seed-frozen-stokes", action="store_true", help="seed algebraic Stokes velocity/pressure on the untouched initial geometry")
+    ap.add_argument("--stokes-first-guess", action="store_true", help="inertial, moving frame: frozen-Stokes fields as the first Newton iterate only; the run still starts from rest")
+    ap.add_argument("--energy-budget", action="store_true", help="record kinetic energy, free-surface area and viscous dissipation in neck.csv")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
     ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
@@ -93,55 +100,18 @@ def main() -> int:
     ap.add_argument("--zone-inner", type=float, default=1e-3)
     ap.add_argument("--zone-outer", type=float, default=2.0)
     ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
-    args = ap.parse_args()
+    return ap
 
-    case = json.loads(args.case.read_text())
-    if case.get("schema") != "pyoomph-case-v1":
-        raise SystemExit("not a pyoomph-case-v1 case")
-    bridge = case["physics"]["initial_bridge"]
-    if case["physics"].get("inertia", True):
-        raise SystemExit("this runner is for the La=0 Stokes limit only")
-    if args.restart_from is not None and (args.out / "neck.csv").exists():
-        raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
-    if args.restart_from is not None and not args.seed_frozen_stokes:
-        raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
-    if args.seed_frozen_stokes and not args.neck_frame_moving:
-        raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
-    if args.audit_blocks and (args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6):
-        raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
-    args.out.mkdir(parents=True, exist_ok=True)
-    commit = component_commit()
-    import pyoomph
 
-    manifest = {
-        "case_file": str(args.case),
-        "case_sha256": hashlib.sha256(args.case.read_bytes()).hexdigest(),
-        "case_id": case["case_id"],
-        "component_commit": commit,
-        "case_fields_used": CASE_FIELDS_USED,
-        "pyoomph_module": pyoomph.__file__,
-        "argv": sys.argv,
-    }
-    restart = None
-    if args.restart_from is not None:
-        import numpy as np
-        with np.load(args.restart_from) as data:
-            restart = {k: (data[k].tolist() if data[k].ndim else data[k].item()) for k in data.files}
-        manifest["restart_from"] = {"path": str(args.restart_from),
-                                    "sha256": hashlib.sha256(args.restart_from.read_bytes()).hexdigest(),
-                                    "t": restart["t"], "R_min": restart["R_min"]}
-    restarting_here = restart is not None and (args.out / "run-manifest.json").exists()
-    write_manifest(args.out, manifest,
-                   f"run-manifest-step{int(restart['steps']):06d}" if restarting_here else "run-manifest")
-    with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
-
+def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
+                  restart: dict | None) -> StokesTipCoalescence:
+    """The solver for parsed options, the case's initial bridge and Oh (None in the Stokes limit)."""
     spatial_scale = float(bridge["R0"]) if (args.spatial_scale is not None and args.spatial_scale <= 0) else args.spatial_scale
     S = spatial_scale if spatial_scale else 1.0
     # Max-residual roundoff floor: proportional to the initial capillary pressure 1/Z0 and to
     # 1/S^2 under a pyoomph spatial scale S (measured: 2e-8 at Z0=5e-7, S=1; 0.016 at S=1e-3).
     newton_tol = args.newton_tol if args.newton_tol is not None else 1e-7 * (5e-7 / float(bridge["Z0"])) / S**2
-    pb = StokesTipCoalescence(
+    return StokesTipCoalescence(
         R0=float(bridge["R0"]),
         Z0=float(bridge["Z0"]),
         output_dir=args.out,
@@ -181,12 +151,79 @@ def main() -> int:
         tip_apex_zone=args.tip_apex_zone,
         zone_inner=args.zone_inner,
         zone_outer=args.zone_outer,
+        Oh=Oh,
+        energy_budget=args.energy_budget,
+        t_stop=args.t_stop,
+        snapshot_dt=args.snapshot_dt,
+        field_frames=args.field_frames,
     )
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    case = json.loads(args.case.read_text())
+    if case.get("schema") != "pyoomph-case-v1":
+        raise SystemExit("not a pyoomph-case-v1 case")
+    bridge = case["physics"]["initial_bridge"]
+    Oh = None
+    if case["physics"].get("inertia", True):
+        Oh = float(case["physics"]["Oh"])
+        if case["physics"].get("initial_velocity", "quiescent") != "quiescent":
+            raise SystemExit("an inertial case must start from rest")
+        if args.seed_frozen_stokes:
+            raise SystemExit("the frozen-Stokes seed sets the initial velocity; an inertial case starts from rest (see --stokes-first-guess)")
+        if args.restart_from is not None:
+            raise SystemExit("restart files hold the interface only, the complete state only in the Stokes limit")
+    if args.restart_from is not None and (args.out / "neck.csv").exists():
+        raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
+    if args.restart_from is not None and not args.seed_frozen_stokes:
+        raise SystemExit("--restart-from requires --seed-frozen-stokes: the velocity is re-solved on the restart mesh")
+    if args.seed_frozen_stokes and not args.neck_frame_moving:
+        raise SystemExit("frozen-Stokes seed is limited to the moving-frame route")
+    if args.stokes_first_guess and (Oh is None or not args.neck_frame_moving):
+        raise SystemExit("--stokes-first-guess is for inertial cases on the moving-frame route")
+    if args.audit_blocks and (args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6):
+        raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
+    args.out.mkdir(parents=True, exist_ok=True)
+    commit = component_commit()
+    import pyoomph
+
+    manifest = {
+        "case_file": str(args.case),
+        "case_sha256": hashlib.sha256(args.case.read_bytes()).hexdigest(),
+        "case_id": case["case_id"],
+        "component_commit": commit,
+        "case_fields_used": CASE_FIELDS_USED + (INERTIAL_FIELDS_USED if Oh is not None else []),
+        "Oh": Oh,
+        "units": UNITS,
+        "pyoomph_module": pyoomph.__file__,
+        "argv": sys.argv,
+    }
+    restart = None
+    if args.restart_from is not None:
+        import numpy as np
+        with np.load(args.restart_from) as data:
+            restart = {k: (data[k].tolist() if data[k].ndim else data[k].item()) for k in data.files}
+        manifest["restart_from"] = {"path": str(args.restart_from),
+                                    "sha256": hashlib.sha256(args.restart_from.read_bytes()).hexdigest(),
+                                    "t": restart["t"], "R_min": restart["R_min"]}
+    restarting_here = restart is not None and (args.out / "run-manifest.json").exists()
+    write_manifest(args.out, manifest,
+                   f"run-manifest-step{int(restart['steps']):06d}" if restarting_here else "run-manifest")
+    with (args.out / "progress.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "start", "case_id": case["case_id"], "component_commit": commit}) + "\n")
+
+    pb = build_problem(args, bridge, Oh, restart)
     pb.quiet()
     if args.seed_frozen_stokes:
         from stokes_block_audit import seed_frozen_stokes
         pb.initialise()
         seed_frozen_stokes(pb, args.out, args.dt_initial)
+    elif args.stokes_first_guess:
+        from stokes_block_audit import stokes_first_guess
+        pb.initialise()
+        stokes_first_guess(pb, args.out, args.dt_initial)
     if args.audit_blocks:
         summary = pb.run_campaign(max_steps=1, max_wall_s=args.max_wall_s)
         if summary["steps"] != 1:

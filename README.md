@@ -41,7 +41,9 @@ compared with.
 | `docs/` | Approved documentation. |
 
 `fem` and `bim` never import each other and share only the case files, so agreement
-between them is a test of the numerics of each. Run output is never stored here.
+between them is a test of the numerics of each. Raw meshes, field histories and
+restart data remain outside this repository; approved documentation includes
+compact scalar plot inputs.
 Each evidence case lists its simulations in a `runs.toml` by identifier, commit and
 SHA-256 of the neck history; the figure scripts find the outputs through an
 untracked `data-roots.toml` (see `src/coalescence/analysis/runs.py`).
@@ -83,13 +85,33 @@ refuses to restart into a directory that already holds a run. The finite-element
 runner and its tests need the pinned pyoomph environment; the boundary-integral solver
 needs only numpy and scipy.
 
+Case videos: with `--field-frames` the finite-element runner saves the P2 velocity and
+pressure fields at the start, at every remesh and at every `--snapshot-dt`. The command
+`python postProcess/make_case_video.py <runtime> [<continuation> ...] --out-dir <folder>
+--name <stem>` turns the run folders of one case into a video of three successive zooms
+centred on the neck tip (the drop pair, the neck, the meniscus), each showing the speed
+and the viscous dissipation rate, on a clock that is logarithmic in time early and linear
+late. A Stokes run without saved fields is rebuilt from its saved interfaces, since its
+velocity is fixed by the geometry; an inertial run needs `--field-frames`.
+
 ## Status
 
 The Stokes (La = 0) branch of Anthony et al. (2020) Figure 3 has been computed from
 their exact initial bridge, R0 = 10⁻⁶ and Z0 = R0²/2, to R_min = 0.03. It agrees
 with the published curve for R_min ≥ 10⁻⁴ but not during the startup transient; see
 [`docs/la0-stokes-anthony-fig3.md`](docs/la0-stokes-anthony-fig3.md). The
-finite-Ohnesorge branch and the non-Newtonian problems are not yet computed.
+finite-Ohnesorge solver is verified against the exact linear modes of a viscous drop,
+the Stokes limit and its numerical choices at Oh = 0.6 (`verificationCases/`). At
+Oh = 0.6, the FEM agrees with Anthony et al. in the developed velocity range and
+shows a finite-inertia deficit of 6.5% at R_min = 10⁻⁵ and 12.2% at R_min = 0.03;
+an independent Stokes BIM reproduces the FEM startup to 0.243%. The complete
+validation record is [`docs/finite-oh-validation.md`](docs/finite-oh-validation.md),
+with a [compiled TeX report](docs/finite-oh-validation/finite-oh-validation-v4.pdf).
+The eight-radius Stokes family is complete; the finite-Oh endpoint radii agree
+within 0.042% beyond R_min = 0.003. Intermediate finite-Oh radii and the remaining
+mesh/remeshing partners are not yet computed.
+The Oh ladder needed to test the crossover at R_c approximately Oh remains open.
+The non-Newtonian problems are not yet computed.
 
 ## Archived lines
 
