@@ -6,7 +6,6 @@ import argparse
 import csv
 import json
 import math
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -15,22 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coalescence.fem.drop_oscillation import OscillatingDropProblem, rayleigh_lamb  # noqa: E402
+from coalescence.provenance import component_commit, pyoomph_revision  # noqa: E402
 
 FIELDS = ["t", "z_pole", "r_equator", "volume", "kinetic", "area", "dissipation", "wall_s"]
-
-
-def component_commit() -> str:
-    commit_file = ROOT / "COMMIT"
-    if commit_file.is_file():
-        return commit_file.read_text().strip()
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
-                                         stderr=subprocess.DEVNULL).strip()
-        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
-                                        text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return "unknown"
-    return commit + ("-dirty" if dirty else "")
 
 
 def main() -> int:
@@ -50,7 +36,8 @@ def main() -> int:
     period = 2.0 * math.pi / theory["omega"]
     dt = period / a.steps_per_period
     n_steps = int(round(a.periods * a.steps_per_period))
-    manifest = {"solver": "coalescence.fem.drop_oscillation", "component_commit": component_commit(),
+    manifest = {"solver": "coalescence.fem.drop_oscillation", "component_commit": component_commit(ROOT),
+                "pyoomph": pyoomph_revision(),
                 "Oh": a.Oh, "eps": a.eps, "resolution": a.resolution, "spatial_scale": a.spatial_scale, "dt": dt, "steps": n_steps,
                 "theory": theory, "units": "visco-capillary; density 1/Oh^2", "argv": sys.argv}
     (a.out / "run-manifest.json").write_text(json.dumps(manifest, indent=1))

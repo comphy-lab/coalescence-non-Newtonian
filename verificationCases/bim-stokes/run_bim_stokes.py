@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coalescence.bim.geometry import Meridian, anthony_initial_meridian  # noqa: E402
+from coalescence.cases import validate_case  # noqa: E402
+from coalescence.provenance import component_commit  # noqa: E402
 from coalescence.bim.solver import RunConfig, run  # noqa: E402
 
 
@@ -23,16 +24,24 @@ from coalescence.bim.solver import RunConfig, run  # noqa: E402
 CASE_FIELDS_USED = ["physics.inertia", "physics.initial_bridge.R0", "physics.initial_bridge.Z0"]
 
 
-def component_commit() -> str:
-    """HEAD of the component, marked ``-dirty`` when tracked files differ from it."""
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
-                                         stderr=subprocess.DEVNULL).strip()
-        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
-                                        text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return "unknown"
-    return commit + ("-dirty" if dirty else "")
+
+def check_restart_source(restart: Path, case_sha256: str) -> None:
+    """Refuse a checkpoint that was not written by a run of the same case.
+
+    The solver writes checkpoints to ``<run>/restart/``, beside the run's manifest. The
+    numerical options may change in a continuation; the case may not.
+    """
+    manifest_path = restart.resolve().parent.parent / "run-manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"{restart}: no run-manifest.json in the run folder of this checkpoint, so its case "
+                         "cannot be checked")
+    source = json.loads(manifest_path.read_text())
+    if source.get("solver") != "coalescence.bim":
+        raise SystemExit(f"{restart} was not written by the boundary-integral solver")
+    if source.get("case_sha256") != case_sha256:
+        raise SystemExit(f"{restart} belongs to a run of another case ({source.get('case_id')}); "
+                         "a continuation must use the case of its parent run")
+
 
 def exit_status(summary: dict) -> int:
     """0 only for a run that reached its stop radius; any other ending is a non-zero exit."""
@@ -73,23 +82,23 @@ def main() -> int:
     ap.add_argument("--newton-retries", type=int, default=0, help="halve dt and retry an unconverged Newton step")
     a = ap.parse_args()
     case = json.loads(a.case.read_text())
-    if case["physics"].get("inertia", True):
-        raise SystemExit("the boundary-integral solver is for the La = 0 Stokes limit only")
+    validate_case(case, stokes_only=True)
     bridge = case["physics"]["initial_bridge"]
     R0, Z0 = float(bridge["R0"]), float(bridge["Z0"])
     cfg = RunConfig(k=a.k, n_tip=a.n_tip, h_max=a.h_max, dt_initial=a.dt_initial or 1e-3 * Z0,
                     dt_fraction=a.dt_fraction, curvature_target=a.curvature_target, R_stop=a.r_stop,
                     max_steps=a.max_steps, max_wall_s=a.max_wall_s, newton=a.newton, newton_tol=a.newton_tol,
                     newton_stall=a.newton_stall, newton_retries=a.newton_retries)
-    if a.restart_from is not None and (a.out / "neck.csv").exists():
-        raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
+    if (a.out / "neck.csv").exists():
+        if a.restart_from is not None:
+            raise SystemExit("a restart segment needs its own output directory; join it to its parent with `continues` in the run list")
+        raise SystemExit(f"{a.out} already holds a run; choose a new output directory")
+    case_sha256 = hashlib.sha256(a.case.read_bytes()).hexdigest()
+    if a.restart_from is not None:
+        check_restart_source(a.restart_from, case_sha256)
     a.out.mkdir(parents=True, exist_ok=True)
-    commit_file = ROOT / "COMMIT"
-    if commit_file.is_file():                      # source materialised from an archive
-        commit = commit_file.read_text().strip()
-    else:
-        commit = component_commit()
-    manifest = {"case_file": str(a.case), "case_sha256": hashlib.sha256(a.case.read_bytes()).hexdigest(),
+    commit = component_commit(ROOT)
+    manifest = {"case_file": str(a.case), "case_sha256": case_sha256,
                 "case_id": case["case_id"], "solver": "coalescence.bim", "component_commit": commit,
                 "case_fields_used": CASE_FIELDS_USED, "config": asdict(cfg), "argv": sys.argv}
     t0, dt0, step0 = 0.0, None, 0
