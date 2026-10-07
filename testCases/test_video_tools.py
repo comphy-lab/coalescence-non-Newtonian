@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sys
 import tempfile
@@ -132,6 +133,33 @@ class EnergyBudgetTests(unittest.TestCase):
 
 
 class ReconstructionTests(unittest.TestCase):
+    def runtime(self, remesh: range, restart: bool) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name)
+        (runtime / "restart").mkdir()
+        for k in remesh:
+            (runtime / "restart" / f"remesh_{k:04d}.npz").write_bytes(b"")
+        manifest = {"restart_from": {"t": 1e-7}} if restart else {}
+        (runtime / "run-manifest.json").write_text(json.dumps(manifest))
+        return runtime
+
+    def test_root_run_frames_start_at_the_initial_bridge(self):
+        saved = reconstruct_stokes_fields.saved_frames(self.runtime(range(1, 4), restart=False), "remesh")
+        self.assertEqual(saved, [0, 1, 2, 3])
+        self.assertEqual(reconstruct_stokes_fields.frame_list("0:2", saved), [0, 1])
+
+    def test_continuation_frames_follow_its_own_remesh_numbering(self):
+        runtime = self.runtime(range(40, 43), restart=True)
+        (runtime / "restart" / "remesh_0043.npz.partial").write_bytes(b"")
+        (runtime / "restart" / "remesh_old.npz").write_bytes(b"")
+        saved = reconstruct_stokes_fields.saved_frames(runtime, "remesh")
+        self.assertEqual(saved, [40, 41, 42])
+        self.assertEqual(reconstruct_stokes_fields.frame_list(None, saved), [40, 41, 42])
+        self.assertEqual(reconstruct_stokes_fields.frame_list("0:41", saved), [40])
+        with self.assertRaisesRegex(SystemExit, "saved states"):
+            reconstruct_stokes_fields.frame_list("1", saved)
+
     def test_snapshot_mode_without_snapshots_fails(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -139,7 +167,7 @@ class ReconstructionTests(unittest.TestCase):
         (runtime / "snapshots").mkdir(parents=True)
         argv = ["reconstruct_stokes_fields.py", str(runtime), "--out", str(Path(tmp.name) / "out"),
                 "--states", "snapshots"]
-        with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(SystemExit, "no snapshots"):
+        with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(SystemExit, "no saved snapshots"):
             reconstruct_stokes_fields.main()
         self.assertFalse((Path(tmp.name) / "out").exists())
 
