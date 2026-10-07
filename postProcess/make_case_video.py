@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,12 @@ def rebuild_stokes(runtime: Path, out: Path, python: str, workers: int) -> Path:
     if subprocess.run(cmd, check=False).returncode != 0:
         raise SystemExit(f"field reconstruction failed for {runtime}")
     return out / "fields"
+
+
+def stills(media: Path, name: str) -> list[Path]:
+    """Stills written by the render named ``name``; the name is a literal file stem, never a pattern."""
+    still = re.compile(re.escape(name) + r"-still-\d+\.png")
+    return sorted(p for p in media.iterdir() if still.fullmatch(p.name))
 
 
 def sha256(path: Path) -> str:
@@ -109,7 +116,7 @@ def main() -> int:
         folders.append(folder)
         sources.append({"runtime": str(rt), "fields": str(folder), "origin": "run" if own else "rebuilt-stokes"})
     video = out / "media" / f"{a.name}.mp4"
-    for old in (out / "media").glob(f"{a.name}-still-*.png"):
+    for old in stills(out / "media", a.name):
         old.unlink()                                  # stills of an earlier render under this name
     cmd = [sys.executable, str(HERE / "render_hybrid_video.py"), *map(str, folders), "--out", str(video),
            "--workers", str(a.workers), "--duration", str(a.duration), "--t-switch", str(a.t_switch),
@@ -124,7 +131,7 @@ def main() -> int:
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
                            capture_output=True, text=True).stdout.strip()
     # Only the outputs of this render: media/ may also hold earlier renders under other names.
-    outputs = [video, grid, *sorted((out / "media").glob(f"{a.name}-still-*.png"))]
+    outputs = [video, grid, *stills(out / "media", a.name)]
     manifest = {"schema": "case-video-v1", "component_commit": commit + ("-dirty" if dirty else ""),
                 "sources": sources, "video": str(video), "qa_grid": str(grid), "encode": info,
                 "settings": {"duration_s": a.duration, "t_switch": a.t_switch,
