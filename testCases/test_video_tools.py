@@ -1,0 +1,176 @@
+"""The case-video and energy-budget tools refuse unusable inputs and write resolvable playback links."""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "postProcess"))
+import reconstruct_stokes_fields
+from make_case_video import stills
+from check_energy_budget import budget
+from render_case_dashboard_video import initial_radius
+from render_hybrid_video import check_playback, collect, link_sequence, playback_sequence
+
+
+class PlaybackTests(unittest.TestCase):
+    def test_links_resolve_with_relative_output(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(tmp.name)
+        frames = Path("media") / "case-frames"
+        frames.mkdir(parents=True)
+        for k in range(2):
+            (frames / f"frame-{k:05d}.png").write_bytes(b"png")
+        seq_dir = Path("media") / "case-sequence"
+        link_sequence(np.array([0, 0, 1]), frames, seq_dir)
+        links = sorted(seq_dir.glob("seq-*.png"))
+        self.assertEqual(len(links), 3)
+        self.assertTrue(all(link.is_symlink() and link.exists() for link in links))
+        self.assertEqual(links[2].resolve(), (frames / "frame-00001.png").resolve())
+
+    def test_unplayable_inputs_are_refused(self):
+        with self.assertRaisesRegex(SystemExit, "two frames"):
+            check_playback(np.array([0.0]), 32.0, 0.6, 30)
+        for duration in (0.5, 0.6, 0.61):
+            with self.subTest(duration=duration), self.assertRaisesRegex(SystemExit, "hold-first"):
+                check_playback(np.array([0.0, 1e-3]), duration, 0.6, 30)
+        with self.assertRaisesRegex(SystemExit, "negative"):
+            check_playback(np.array([0.0, 1e-3]), 32.0, -0.1, 30)
+        times = np.array([0.0, 1e-3, 1e-2])
+        check_playback(times, 2.0, 0.6, 30)
+        self.assertEqual(len(playback_sequence(times, 0.05, 2.0, 30, 0.6)), 60)
+
+
+class FrameCollectionTests(unittest.TestCase):
+    def folders(self, *series: tuple[float, ...]) -> list[Path]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = []
+        for i, times in enumerate(series):
+            folder = Path(tmp.name) / f"run-{i}"
+            folder.mkdir()
+            for k, t in enumerate(times):
+                np.savez(folder / f"frame-{k:04d}.npz", t=t)
+            out.append(folder)
+        return out
+
+    def times(self, files: list[Path]) -> list[float]:
+        return [float(np.load(f)["t"]) for f in files]
+
+    def test_continuation_from_the_last_state_is_spliced(self):
+        # A rebuilt continuation repeats the initial bridge as frame 0 and starts at the parent's last time.
+        files = collect(self.folders((0.0, 1.0, 2.0, 3.0), (0.0, 3.0, 4.0, 5.0)))
+        self.assertEqual(self.times(files), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+
+    def test_continuation_overlapping_the_parent_tail_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "before the last frame"):
+            collect(self.folders((0.0, 1.0, 2.0, 3.0), (0.0, 2.5, 4.0)))
+        with self.assertRaisesRegex(SystemExit, "before the last frame"):
+            collect(self.folders((0.0, 1.0, 2.0, 3.0), (2.0, 4.0)))
+
+
+class CaseVideoTests(unittest.TestCase):
+    def test_stills_match_the_name_literally(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        media = Path(tmp.name)
+        for name in ("a-still-0000.png", "a-still-0007.png", "ab-still-0000.png", "a-still-x-still-0000.png",
+                     "a-still-0000.png.bak", "a.mp4", "[a]-still-0001.png"):
+            (media / name).write_bytes(b"")
+        self.assertEqual([p.name for p in stills(media, "a")], ["a-still-0000.png", "a-still-0007.png"])
+        self.assertEqual(stills(media, "*"), [])
+        self.assertEqual([p.name for p in stills(media, "[a]")], ["[a]-still-0001.png"])
+
+
+class ContactTimeRadiusTests(unittest.TestCase):
+    def test_radius_is_the_initial_bridge_row(self):
+        self.assertEqual(initial_radius({"t": np.array([0.0, 1e-3]), "R_min": np.array([1e-6, 2e-6])}), 1e-6)
+
+    def test_history_without_initial_row_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "t = 0"):
+            initial_radius({"t": np.array([1e-3, 2e-3]), "R_min": np.array([2e-6, 3e-6])})
+
+
+class EnergyBudgetTests(unittest.TestCase):
+    COLUMNS = ("t", "R_min", "kinetic", "area", "dissipation", "n_remesh")
+
+    def runtime(self, rows: list[tuple[float, ...]]) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with (Path(tmp.name) / "neck.csv").open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(self.COLUMNS)
+            writer.writerows(rows)
+        return Path(tmp.name)
+
+    def test_empty_history_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "no rows"):
+            budget(self.runtime([]))
+
+    def test_no_usable_interval_is_refused(self):
+        start = (0.0, 1e-3, 0.0, 10.0, 2.0, 0)
+        for rows in ([start],
+                     [start, (1e-3, 1.1e-3, 0.0, 9.998, 2.0, 0)],
+                     [start, (1e-3, 1.1e-3, 0.0, 9.998, 2.0, 0), (2e-3, 1.2e-3, 0.0, 9.996, 2.0, 1)]):
+            with self.subTest(rows=len(rows)), self.assertRaisesRegex(SystemExit, "no usable energy interval"):
+                budget(self.runtime(rows))
+
+    def test_closed_budget_has_zero_residual(self):
+        rows = [(k * 1e-3, 1e-3 * (1 + 0.1 * k), 0.0, 10.0 - 2.0 * k * 1e-3, 2.0, 0) for k in range(4)]
+        result = budget(self.runtime(rows))
+        self.assertEqual(result["steps_used"], 2)
+        self.assertAlmostEqual(result["relative_residual_median"], 0.0, places=9)
+
+
+class ReconstructionTests(unittest.TestCase):
+    def runtime(self, remesh: range, restart: bool) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name)
+        (runtime / "restart").mkdir()
+        for k in remesh:
+            (runtime / "restart" / f"remesh_{k:04d}.npz").write_bytes(b"")
+        manifest = {"restart_from": {"t": 1e-7}} if restart else {}
+        (runtime / "run-manifest.json").write_text(json.dumps(manifest))
+        return runtime
+
+    def test_root_run_frames_start_at_the_initial_bridge(self):
+        saved = reconstruct_stokes_fields.saved_frames(self.runtime(range(1, 4), restart=False), "remesh")
+        self.assertEqual(saved, [0, 1, 2, 3])
+        self.assertEqual(reconstruct_stokes_fields.frame_list("0:2", saved), [0, 1])
+
+    def test_continuation_frames_follow_its_own_remesh_numbering(self):
+        runtime = self.runtime(range(40, 43), restart=True)
+        (runtime / "restart" / "remesh_0043.npz.partial").write_bytes(b"")
+        (runtime / "restart" / "remesh_old.npz").write_bytes(b"")
+        saved = reconstruct_stokes_fields.saved_frames(runtime, "remesh")
+        self.assertEqual(saved, [40, 41, 42])
+        self.assertEqual(reconstruct_stokes_fields.frame_list(None, saved), [40, 41, 42])
+        self.assertEqual(reconstruct_stokes_fields.frame_list("0:41", saved), [40])
+        with self.assertRaisesRegex(SystemExit, "saved states"):
+            reconstruct_stokes_fields.frame_list("1", saved)
+
+    def test_snapshot_mode_without_snapshots_fails(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name) / "runtime"
+        (runtime / "snapshots").mkdir(parents=True)
+        argv = ["reconstruct_stokes_fields.py", str(runtime), "--out", str(Path(tmp.name) / "out"),
+                "--states", "snapshots"]
+        with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(SystemExit, "no saved snapshots"):
+            reconstruct_stokes_fields.main()
+        self.assertFalse((Path(tmp.name) / "out").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

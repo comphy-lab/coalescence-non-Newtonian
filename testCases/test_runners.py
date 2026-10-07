@@ -38,6 +38,9 @@ class RunnerContractTests(unittest.TestCase):
             self.assertEqual(runner.exit_status({"status": "reached_R_stop"}), 0)
             for status in ("wall_limit", "limit", "newton_failure", "running"):
                 self.assertEqual(runner.exit_status({"status": status}), 1, (runner.__name__, status))
+        # Only the FEM runner has a stop time.
+        self.assertEqual(self.fem.exit_status({"status": "reached_t_stop"}), 0)
+        self.assertEqual(self.bim.exit_status({"status": "reached_t_stop"}), 1)
 
     def test_restart_into_an_existing_run_is_refused(self) -> None:
         for runner, name in ((self.bim, "run_bim_stokes.py"), (self.fem, "run_fem_stokes_tip.py")):

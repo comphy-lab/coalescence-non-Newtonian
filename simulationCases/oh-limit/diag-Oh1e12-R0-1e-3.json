@@ -1,0 +1,75 @@
+{
+ "schema": "pyoomph-case-v1",
+ "case_id": "diag-Oh1e12-R0-1e-3",
+ "geometry": {
+  "kind": "axisymmetric",
+  "coordinates": [
+   "r",
+   "z"
+  ],
+  "frame": "laboratory",
+  "domain": "one quadrant of one drop: axis r=0, symmetry plane z=0, free surface S(t)"
+ },
+ "nondimensionalization": {
+  "length": "R_drop",
+  "time": "sqrt(rho*R_drop^3/gamma)  (inertial-capillary, t_IC)",
+  "pressure": "gamma/R_drop",
+  "reference": "Anthony, Harris & Basaran, PRF 5, 033608 (2020), Sec. II.A"
+ },
+ "physics": {
+  "problem": "newtonian-drop-coalescence-free-surface",
+  "constitutive": "Newtonian",
+  "exterior": {
+   "kind": "passive",
+   "density": 0.0,
+   "viscosity": 0.0,
+   "pressure": "constant datum"
+  },
+  "inertia": true,
+  "Oh": 1000000000000.0,
+  "inverse_Oh": 1e-12,
+  "initial_bridge": {
+   "R0": 0.001,
+   "Z0": 5e-07,
+   "surface": "[r-(R0+Z0)]^2 + z^2 = Z0^2  (Eq. 2)",
+   "approximate_point_contact": true
+  },
+  "initial_velocity": "quiescent"
+ },
+ "tolerances": {
+  "newton": 1e-09,
+  "time_adaptive_target": 1e-06
+ },
+ "mesh": {
+  "characteristic_size": 0.05,
+  "remeshing": true,
+  "remesh_rule": "remesh whenever R_min has grown by a factor of 4 (Anthony 2020, Sec. II.B.2)",
+  "bridge_region": "ellipse of Eq. 6: z1=R_min (R_min<1/2), r2=2*R_min, slope tan(pi/3) at axis, 0 at plane; lagged one step",
+  "smallest_scale_to_resolve": "curvature radius ~ R_min^3"
+ },
+ "output": {
+  "write_states": true,
+  "diagnostics": [
+   "R_min(t)",
+   "Z_b = z(r=1.05 R_min)",
+   "u_min = u(r=R_min)",
+   "|2H| at neck",
+   "interface profile",
+   "V_bod (back-of-drop axial velocity)",
+   "t_con by power-law extrapolation"
+  ],
+  "cadence": 0.05,
+  "cadence_unit": "decades of R_min (log10) between diagnostic records; states also written at every remesh",
+  "cadence_rule": "every remesh and every decade of R_min"
+ },
+ "completion": {
+  "kind": "event",
+  "value": "R_min >= 0.5 or reconnection detected",
+  "note": "stop when the bridge reaches half the drop radius, or on reconnection (Duchemin et al. 2003), which the ALE algorithm cannot continue past"
+ },
+ "provenance": {
+  "tier": "T3",
+  "reproduces": "Fig. 7, Fig. 8, Fig. 9",
+  "note": "Oh>=3 indistinguishable from T0; 0.3 and 0.03 depart to tau^0.5 near R_c ~ Oh; 0.001 inviscid from the start."
+ }
+}
