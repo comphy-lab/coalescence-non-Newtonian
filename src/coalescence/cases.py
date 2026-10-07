@@ -13,8 +13,12 @@ from typing import Any
 SCHEMA = "pyoomph-case-v1"
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _positive(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    return _number(value) and value > 0
 
 
 def case_problems(case: Any, *, stokes_only: bool = False) -> list[str]:
@@ -34,7 +38,7 @@ def case_problems(case: Any, *, stokes_only: bool = False) -> list[str]:
         return problems + ["physics must be an object"]
     exterior = physics.get("exterior")
     if (not isinstance(exterior, dict) or exterior.get("kind") != "passive"
-            or exterior.get("density") != 0 or exterior.get("viscosity") != 0):
+            or not all(_number(exterior.get(k)) and exterior[k] == 0 for k in ("density", "viscosity"))):
         problems.append("physics.exterior must be passive, with zero density and viscosity")
     inertia = physics.get("inertia")
     if not isinstance(inertia, bool):
