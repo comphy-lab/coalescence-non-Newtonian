@@ -24,6 +24,8 @@ import numpy as np
 def budget(runtime: Path) -> dict:
     with (runtime / "neck.csv").open(newline="") as fh:
         rows = list(csv.DictReader(fh))
+    if not rows:
+        raise SystemExit(f"{runtime}: neck.csv has no rows")
     if "dissipation" not in rows[0]:
         raise SystemExit(f"{runtime}: neck.csv has no energy columns (run with --energy-budget)")
     col = {k: np.array([float(r[k]) for r in rows]) for k in ("t", "R_min", "kinetic", "area", "dissipation", "n_remesh")}
@@ -33,8 +35,10 @@ def budget(runtime: Path) -> dict:
     rhs = -0.5 * (col["dissipation"][1:] + col["dissipation"][:-1])
     same_mesh = np.diff(col["n_remesh"]) == 0
     first = np.zeros(lhs.size, bool)
-    first[0] = True                                   # the start from rest is first order
+    first[:1] = True                                  # the start from rest is first order
     use = same_mesh & ~first & (np.abs(rhs) > 0)
+    if not use.any():
+        raise SystemExit(f"{runtime}: no usable energy interval (need a second step on an unchanged mesh)")
     rel = (lhs[use] - rhs[use]) / np.abs(rhs[use])
     R = np.sqrt(col["R_min"][1:] * col["R_min"][:-1])[use]
     bands = {}

@@ -114,6 +114,31 @@ def playback_sequence(times: np.ndarray, t_switch: float, duration: float, fps: 
     return np.concatenate([np.zeros(n_first, dtype=int), np.clip(rest, 1, len(times) - 1)])
 
 
+def check_playback(times: np.ndarray, duration: float, hold_first: float, fps: int) -> None:
+    """Refuse, before any frame is rendered, inputs from which no playback sequence can be built."""
+    if len(times) < 2:
+        raise SystemExit("a video needs at least two frames (t = 0 and one later state)")
+    if hold_first < 0:
+        raise SystemExit("--hold-first must not be negative")
+    if int(round((duration - hold_first) * fps)) < 1:
+        raise SystemExit("--duration must exceed --hold-first by at least one output frame")
+
+
+def link_sequence(seq: np.ndarray, frames_dir: Path, seq_dir: Path) -> None:
+    """Gapless numbered links seq-NNNNN.png -> the held frame-NNNNN.png, for ffmpeg.
+
+    The targets are absolute: a relative target would resolve against ``seq_dir``, not the
+    working directory, and every link would dangle when ``--out`` is relative.
+    """
+    if seq_dir.is_dir():
+        for old in seq_dir.glob("seq-*.png"):
+            old.unlink()
+    seq_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = frames_dir.resolve()
+    for j, k in enumerate(seq):
+        (seq_dir / f"seq-{j:05d}.png").symlink_to(frames_dir / f"frame-{int(k):05d}.png")
+
+
 def fmt(v: float) -> str:
     return f"{v:.3f}" if 1e-2 <= abs(v) < 10 else ("0" if v == 0 else sci(v))
 
@@ -332,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
     times = np.array([float(np.load(f)["t"]) for f in files])
     if times[0] != 0.0 or np.any(np.diff(times) <= 0):
         raise SystemExit("frames must start at t = 0 and advance in time")
+    if not a.stills_only:
+        check_playback(times, a.duration, a.hold_first, a.fps)
     limits = colour_limits(files)
     print(f"{len(files)} frames from {len(a.fields)} folders", flush=True)
     for k, lim in limits.items():
@@ -361,12 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     # Playback on the warped clock: a gapless numbered sequence of links to the held frames.
     seq = playback_sequence(times, a.t_switch, a.duration, a.fps, a.hold_first)
     seq_dir = a.out.parent / f"{a.out.stem}-sequence"
-    if seq_dir.is_dir():
-        for old in seq_dir.glob("seq-*.png"):
-            old.unlink()
-    seq_dir.mkdir(parents=True, exist_ok=True)
-    for j, k in enumerate(seq):
-        (seq_dir / f"seq-{j:05d}.png").symlink_to(frames_dir / f"frame-{int(k):05d}.png")
+    link_sequence(seq, frames_dir, seq_dir)
     held = np.bincount(seq, minlength=len(files)) / a.fps
     shown = np.count_nonzero(held)
     print(f"playback: {len(seq)} output frames; {shown} of {len(files)} states shown; longest hold "

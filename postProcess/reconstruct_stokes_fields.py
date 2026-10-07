@@ -132,6 +132,8 @@ def main() -> int:
         return 0
     if a.states == "snapshots":
         last = len(list((runtime / "snapshots").glob("snap_*.npz"))) - 1
+        if last < 0:
+            raise SystemExit(f"{runtime}: no snapshots/snap_*.npz to rebuild (use --states remesh)")
     else:
         last = len(list((runtime / "restart").glob("remesh_*.npz")))
     frames = frame_list(a.frames or f"0:{last + 1}", last)

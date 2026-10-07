@@ -99,9 +99,20 @@ class Plots:
     family: tuple[tuple[float, np.ndarray, np.ndarray], ...]
 
 
+def initial_radius(h: dict[str, np.ndarray]) -> float:
+    """R0 of the case: the FEM runner writes the initial bridge as the t = 0 row of neck.csv.
+
+    A history without that row (a continuation given first, or a solver that records only
+    after its first step) would shift the 10 R0 to 100 R0 fit window, so it is refused.
+    """
+    if h["t"][0] != 0.0:
+        raise SystemExit("the neck history must start with the initial bridge at t = 0 (pass the root run first)")
+    return float(h["R_min"][0])
+
+
 def load_plots(runtimes: list[Path], anthony: Path | None, family: Path | None) -> Plots:
     h = history(runtimes)
-    t_con = power_law_contact_time(h["t"], h["R_min"], float(h["R_min"][0])).t_con
+    t_con = power_law_contact_time(h["t"], h["R_min"], initial_radius(h)).t_con
     radius = velocity = None
     if anthony is not None:
         radius = published(anthony / "anthony2020-fig3-radius-digitized.csv", "tau_v", "R_min")
@@ -249,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
     times = np.array([float(np.load(f)["t"]) for f in files])
     if times[0] != 0.0 or np.any(np.diff(times) <= 0):
         raise SystemExit("frames must start at t = 0 and advance in time")
+    if not a.stills_only:
+        hybrid.check_playback(times, a.duration, a.hold_first, a.fps)
     plots = load_plots([r.resolve() for r in a.runtimes], a.anthony, a.family)
     if plots.t[-1] < times[-1] * (1 - 1e-9):
         raise SystemExit("the neck history ends before the last frame")
@@ -278,12 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"frame sizes are not uniform: {sorted(sizes)}")
     seq = hybrid.playback_sequence(times, a.t_switch, a.duration, a.fps, a.hold_first)
     seq_dir = a.out.parent / f"{a.out.stem}-sequence"
-    if seq_dir.is_dir():
-        for old in seq_dir.glob("seq-*.png"):
-            old.unlink()
-    seq_dir.mkdir(parents=True, exist_ok=True)
-    for j, k in enumerate(seq):
-        (seq_dir / f"seq-{j:05d}.png").symlink_to(frames_dir / f"frame-{int(k):05d}.png")
+    hybrid.link_sequence(seq, frames_dir, seq_dir)
     encode = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(a.fps),
               "-i", str(seq_dir / "seq-%05d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
               "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", str(a.out)]
