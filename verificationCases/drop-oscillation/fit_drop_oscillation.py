@@ -15,7 +15,7 @@ sphere: a volume drift of 1e-6 otherwise appears as a surface-energy change comp
 what a weakly damped mode dissipates in a period. The uncorrected value is reported too.
 Writes a JSON summary to --out and prints it.
 
-    python postProcess/fit_drop_oscillation.py <run folder> [...] --out <file.json>
+    python verificationCases/drop-oscillation/fit_drop_oscillation.py <run folder> [...] --out <file.json>
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import curve_fit
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from coalescence.analysis.drop_modes import oscillatory_mode  # noqa: E402
 

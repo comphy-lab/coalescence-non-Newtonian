@@ -17,7 +17,7 @@ from unittest.mock import patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-CASE = ROOT / "simulationCases" / "anthony2020" / "T0-stokes-R0-1e-3.json"
+CASE = ROOT / "validationCases" / "anthony2020" / "T5-stokes-R0-1e-06.json"
 
 
 def load(path: Path):
@@ -30,8 +30,8 @@ def load(path: Path):
 class RunnerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.bim = load(ROOT / "run_bim_stokes.py")
-        cls.fem = load(ROOT / "run_fem_stokes_tip.py")
+        cls.bim = load(ROOT / "verificationCases" / "bim-stokes" / "run_bim_stokes.py")
+        cls.fem = load(ROOT / "simulationCases" / "run_coalescence.py")
 
     def test_exit_status_is_zero_only_at_the_stop_radius(self) -> None:
         for runner in (self.bim, self.fem):
@@ -43,7 +43,7 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(self.bim.exit_status({"status": "reached_t_stop"}), 1)
 
     def test_restart_into_an_existing_run_is_refused(self) -> None:
-        for runner, name in ((self.bim, "run_bim_stokes.py"), (self.fem, "run_fem_stokes_tip.py")):
+        for runner, name in ((self.bim, "run_bim_stokes.py"), (self.fem, "run_coalescence.py")):
             with tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp)
                 (out / "neck.csv").write_text("t,R_min,u_neck,tip_radius\n")
@@ -68,7 +68,7 @@ class FigureScriptTests(unittest.TestCase):
 
 class Fig3ScriptTests(unittest.TestCase):
     def test_relative_refuses_a_non_increasing_abscissa(self) -> None:
-        fig3 = load(ROOT / "postProcess" / "plot_anthony_fig3.py")
+        fig3 = load(ROOT / "validationCases" / "anthony2020" / "plot_anthony_fig3.py")
         ref = np.array([[2e-6, 1.0], [3e-6, 1.0]])
         fig3.relative(ref, np.array([1e-6, 2e-6, 4e-6]), np.array([1.0, 1.0, 1.0]))
         with self.assertRaises(ValueError):
