@@ -4,7 +4,8 @@
 Input is one or more frame folders written by ``reconstruct_stokes_fields.py``, in time
 order, for example the remesh states of a startup run followed by the uniform-time
 snapshots of its continuation. Frames that do not advance the time are dropped, so a
-restart state present in both folders is drawn once.
+restart state present in both folders is drawn once. A continuation that restarts before
+the last frame of the earlier folders is refused.
 
 Three panels per frame share one (t, R_min, rho) stamp. They are successive zooms on the
 neck tip: the window of each zoomed panel is a square centred on the tip, of half-width
@@ -82,12 +83,26 @@ def zoom_scales(fr: Frame) -> tuple[float, float]:
 
 
 def collect(folders: list[Path]) -> list[Path]:
-    """Frame files of all folders in order, keeping only frames that advance the time."""
+    """Frame files of all folders in order, keeping only frames that advance the time.
+
+    Each later folder continues the run of the earlier ones from a restart. A continuation
+    whose first frame after t = 0 (a rebuilt folder repeats the initial bridge as its frame 0)
+    precedes the last frame already collected is refused: the earlier run's frames beyond the
+    restart would show a different trajectory from the neck history, which switches to the
+    continuation at the restart time.
+    """
     out, last = [], -np.inf
     for folder in folders:
+        stamped = []
         for path in read_series(folder.resolve()):
             with np.load(path) as d:
-                t = float(d["t"])
+                stamped.append((path, float(d["t"])))
+        start = next((t for _, t in stamped if t > 0.0), None)
+        if out and start is not None and start < last * (1 - 1e-12):
+            raise SystemExit(f"{folder}: the continuation starts at t = {start:.6e}, before the last frame of the "
+                             f"earlier folders (t = {last:.6e}); restart from the last saved state, or render the "
+                             "runs separately")
+        for path, t in stamped:
             if t > last * (1 + 1e-12) or (t == 0.0 and not out):
                 out.append(path)
                 last = t

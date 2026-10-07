@@ -17,7 +17,7 @@ import reconstruct_stokes_fields
 from make_case_video import stills
 from check_energy_budget import budget
 from render_case_dashboard_video import initial_radius
-from render_hybrid_video import check_playback, link_sequence, playback_sequence
+from render_hybrid_video import check_playback, collect, link_sequence, playback_sequence
 
 
 class PlaybackTests(unittest.TestCase):
@@ -48,6 +48,34 @@ class PlaybackTests(unittest.TestCase):
         times = np.array([0.0, 1e-3, 1e-2])
         check_playback(times, 2.0, 0.6, 30)
         self.assertEqual(len(playback_sequence(times, 0.05, 2.0, 30, 0.6)), 60)
+
+
+class FrameCollectionTests(unittest.TestCase):
+    def folders(self, *series: tuple[float, ...]) -> list[Path]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = []
+        for i, times in enumerate(series):
+            folder = Path(tmp.name) / f"run-{i}"
+            folder.mkdir()
+            for k, t in enumerate(times):
+                np.savez(folder / f"frame-{k:04d}.npz", t=t)
+            out.append(folder)
+        return out
+
+    def times(self, files: list[Path]) -> list[float]:
+        return [float(np.load(f)["t"]) for f in files]
+
+    def test_continuation_from_the_last_state_is_spliced(self):
+        # A rebuilt continuation repeats the initial bridge as frame 0 and starts at the parent's last time.
+        files = collect(self.folders((0.0, 1.0, 2.0, 3.0), (0.0, 3.0, 4.0, 5.0)))
+        self.assertEqual(self.times(files), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+
+    def test_continuation_overlapping_the_parent_tail_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "before the last frame"):
+            collect(self.folders((0.0, 1.0, 2.0, 3.0), (0.0, 2.5, 4.0)))
+        with self.assertRaisesRegex(SystemExit, "before the last frame"):
+            collect(self.folders((0.0, 1.0, 2.0, 3.0), (2.0, 4.0)))
 
 
 class CaseVideoTests(unittest.TestCase):
