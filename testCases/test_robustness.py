@@ -72,6 +72,12 @@ class ProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(component_commit(Path(tmp)), "unknown")
 
+    def test_pyoomph_without_installation_record_is_unknown(self) -> None:
+        import importlib.metadata
+        missing = importlib.metadata.PackageNotFoundError("pyoomph")
+        with patch("importlib.metadata.distribution", side_effect=missing):
+            self.assertEqual(pyoomph_revision(), {"version": None, "url": None, "commit": None})
+
     def test_pyoomph_revision_is_the_installed_commit(self) -> None:
         if importlib.util.find_spec("pyoomph") is None:
             self.skipTest("needs the pinned pyoomph environment")

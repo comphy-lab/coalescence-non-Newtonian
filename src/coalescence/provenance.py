@@ -32,11 +32,16 @@ def pyoomph_revision() -> dict[str, str | None]:
     """Version, source repository and commit of the installed pyoomph, from its installation record.
 
     pyoomph is pinned to a git revision (``pyproject.toml``, ``uv.lock``); the installer records
-    that revision in the distribution's ``direct_url.json``. Neither field is guessed: an
-    installation without the record reports ``None`` for the repository and commit.
+    that revision in the distribution's ``direct_url.json``. Nothing is guessed: without an
+    installation record the version is ``None``, and without the git record the repository
+    and commit are ``None``.
     """
-    dist = importlib.metadata.distribution("pyoomph")
-    info: dict[str, str | None] = {"version": dist.version, "url": None, "commit": None}
+    info: dict[str, str | None] = {"version": None, "url": None, "commit": None}
+    try:
+        dist = importlib.metadata.distribution("pyoomph")
+    except importlib.metadata.PackageNotFoundError:
+        return info
+    info["version"] = dist.version
     record = dist.read_text("direct_url.json")
     if record:
         direct = json.loads(record)
