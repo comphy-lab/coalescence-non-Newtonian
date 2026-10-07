@@ -12,14 +12,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from coalescence.cases import validate_case  # noqa: E402
 from coalescence.fem.stokes_tip import StokesTipCoalescence  # noqa: E402
+from coalescence.provenance import component_commit, pyoomph_revision  # noqa: E402
 
 
 # The case supplies the physics; numerical parameters and the stop radius come from the options.
@@ -27,17 +28,6 @@ CASE_FIELDS_USED = ["schema", "physics.inertia", "physics.initial_bridge.R0", "p
 INERTIAL_FIELDS_USED = ["physics.Oh", "physics.initial_velocity"]
 UNITS = "visco-capillary: length R, velocity gamma/mu, time mu R/gamma, pressure gamma/R; density 1/Oh^2"
 
-
-def component_commit() -> str:
-    """HEAD of the component, marked ``-dirty`` when tracked files differ from it."""
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True,
-                                         stderr=subprocess.DEVNULL).strip()
-        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
-                                        text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return "unknown"
-    return commit + ("-dirty" if dirty else "")
 
 def exit_status(summary: dict) -> int:
     """0 only for a run that reached its stop radius or stop time; any other ending is a non-zero exit."""
@@ -170,8 +160,7 @@ def main() -> int:
     args = build_parser().parse_args()
 
     case = json.loads(args.case.read_text())
-    if case.get("schema") != "pyoomph-case-v1":
-        raise SystemExit("not a pyoomph-case-v1 case")
+    validate_case(case)
     bridge = case["physics"]["initial_bridge"]
     Oh = None
     if case["physics"].get("inertia", True):
@@ -193,7 +182,7 @@ def main() -> int:
     if args.audit_blocks and (args.audit_dt is None or args.audit_dt <= 0 or float(bridge["R0"]) != 1e-6):
         raise SystemExit("block audit requires the exact R0=1e-6 case and positive --audit-dt")
     args.out.mkdir(parents=True, exist_ok=True)
-    commit = component_commit()
+    commit = component_commit(ROOT)
     import pyoomph
 
     manifest = {
@@ -204,6 +193,7 @@ def main() -> int:
         "case_fields_used": CASE_FIELDS_USED + (INERTIAL_FIELDS_USED if Oh is not None else []),
         "Oh": Oh,
         "units": UNITS,
+        "pyoomph": pyoomph_revision(),
         "pyoomph_module": pyoomph.__file__,
         "argv": sys.argv,
     }

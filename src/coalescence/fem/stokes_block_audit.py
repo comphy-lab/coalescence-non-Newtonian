@@ -29,6 +29,12 @@ def _json_safe(value):
     return value
 
 
+def residual_fell(before: float, after: float, factor: float = 1e-6) -> bool:
+    """True when the corrected residual is finite and below ``factor`` times the larger of the
+    initial residual and one. A NaN or infinite residual never passes."""
+    return math.isfinite(before) and math.isfinite(after) and after <= factor * max(before, 1.0)
+
+
 def _backward_error(matrix, solution, rhs) -> float:
     numerator = np.abs(matrix @ solution - rhs)
     denominator = np.abs(matrix) @ np.abs(solution) + np.abs(rhs)
@@ -138,7 +144,8 @@ def seed_frozen_stokes(problem, output_dir: Path, initial_dt: float) -> dict:
         "neck_after_seed": problem.neck_state(),
     }
     (output_dir / "seed-stokes.json").write_text(json.dumps(_json_safe(result), indent=2, allow_nan=False) + "\n")
-    if not result["frozen_geometry_and_neck_unchanged"] or result["residual_after_max"] > 1e-6 * max(result["residual_before_max"], 1):
+    if not result["frozen_geometry_and_neck_unchanged"] or not residual_fell(result["residual_before_max"],
+                                                                             result["residual_after_max"]):
         raise RuntimeError("initial frozen-Stokes seed failed its algebraic or geometry gate")
     problem.assign_initial_values_impulsive()
     problem.timestepper.set_num_unsteady_steps_done(0)
@@ -240,7 +247,7 @@ def audit_one_step(problem, output_dir: Path, audit_dt: float) -> dict:
         }
         if not frozen_unchanged:
             raise RuntimeError("frozen geometry or time history changed during Stokes correction")
-        if result["stokes_block"]["residual_after_max"] > 1e-6 * max(result["stokes_block"]["residual_before_max"], 1):
+        if not residual_fell(result["stokes_block"]["residual_before_max"], result["stokes_block"]["residual_after_max"]):
             result["complement_block"] = {"skipped": "frozen-Stokes residual did not fall sufficiently"}
         else:
             F1, J1 = problem.assemble_jacobian(with_residual=True)

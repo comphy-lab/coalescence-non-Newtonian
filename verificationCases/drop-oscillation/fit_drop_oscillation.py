@@ -40,6 +40,24 @@ def read(path: Path) -> dict[str, np.ndarray]:
     return {k: np.array([float(r[k]) for r in rows]) for k in rows[0]}
 
 
+def energy_budget_per_period(t: np.ndarray, energy: np.ndarray, dissipated: np.ndarray, period: float) -> list[float]:
+    """(E(b) - E(a) + W(b) - W(a)) / (W(b) - W(a)) over whole periods [a, b] = [k T, (k + 1) T], k >= 1.
+
+    E and the dissipated work W are interpolated linearly to the exact period boundaries,
+    so the window does not depend on where the time steps fall.
+    """
+    out = []
+    k = 1
+    while (k + 1) * period <= t[-1] * (1 + 1e-12):
+        bounds = np.array([k * period, min((k + 1) * period, t[-1])])
+        E_a, E_b = np.interp(bounds, t, energy)
+        W_a, W_b = np.interp(bounds, t, dissipated)
+        lost = W_b - W_a
+        out.append(float((E_b - E_a + lost) / lost))
+        k += 1
+    return out
+
+
 def fit_run(path: Path) -> dict:
     m = json.loads((path / "run-manifest.json").read_text())
     d = read(path)
@@ -56,15 +74,8 @@ def fit_run(path: Path) -> dict:
     W = np.concatenate([[0.0], np.cumsum(0.5 * (d["dissipation"][1:] + d["dissipation"][:-1]) * np.diff(d["t"]))])
     E_raw = d["kinetic"] + d["area"]
     E_fix = E_raw - 2.0 * (d["volume"] - d["volume"][0])
-    per_period, per_period_raw = [], []
-    k = 1
-    while (k + 1) * period <= d["t"][-1] * (1 + 1e-12):
-        a, b = np.searchsorted(d["t"], k * period), np.searchsorted(d["t"], (k + 1) * period * (1 - 1e-12))
-        b = min(b, d["t"].size - 1)
-        lost = W[b] - W[a]
-        per_period.append(float((E_fix[b] - E_fix[a] + lost) / lost))
-        per_period_raw.append(float((E_raw[b] - E_raw[a] + lost) / lost))
-        k += 1
+    per_period = energy_budget_per_period(d["t"], E_fix, W, period)
+    per_period_raw = energy_budget_per_period(d["t"], E_raw, W, period)
     return {
         "run": path.name, "Oh": m["Oh"], "eps": m["eps"], "resolution": m["resolution"],
         "steps_per_period": round(period / m["dt"]),
