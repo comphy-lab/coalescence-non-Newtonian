@@ -42,6 +42,17 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(self.fem.exit_status({"status": "reached_t_stop"}), 0)
         self.assertEqual(self.bim.exit_status({"status": "reached_t_stop"}), 1)
 
+    def test_invalid_timestep_options_fail_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'absent'
+            for options in (['--dt-initial', 'nan'], ['--dt-initial', '0'],
+                            ['--dt-max', 'inf'], ['--dt-initial', '.01', '--dt-max', '.005']):
+                with self.subTest(options=options), patch.object(
+                    sys, 'argv', ['run_coalescence.py', str(CASE), '--out', str(out), *options]
+                ), self.assertRaises(SystemExit):
+                    self.fem.main()
+                self.assertFalse(out.exists())
+
     def test_restart_into_an_existing_run_is_refused(self) -> None:
         for runner, name in ((self.bim, "run_bim_stokes.py"), (self.fem, "run_coalescence.py")):
             with tempfile.TemporaryDirectory() as tmp:

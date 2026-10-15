@@ -896,6 +896,7 @@ class StokesTipCoalescence(Problem):
         tip_grow_remesh: float = 3.0,
         dt_fraction: float = 0.02,
         dt_initial: float = 1e-9,
+        dt_max: float | None = None,
         dt_growth: float = 1.3,
         curvature_change_target: float = 0.05,
         newton_tolerance: float = 1e-7,
@@ -963,6 +964,11 @@ class StokesTipCoalescence(Problem):
         self.tip_grow_remesh = float(tip_grow_remesh)
         self.dt_fraction = float(dt_fraction)
         self.dt_initial = float(dt_initial)
+        self.dt_max = None if dt_max is None else float(dt_max)
+        if not math.isfinite(self.dt_initial) or self.dt_initial <= 0:
+            raise ValueError("dt_initial must be positive and finite")
+        if self.dt_max is not None and (not math.isfinite(self.dt_max) or self.dt_max < self.dt_initial):
+            raise ValueError("dt_max must be finite and at least dt_initial")
         self.dt_growth = float(dt_growth)
         self.curvature_change_target = float(curvature_change_target)
         self._last_curvature_ratio = 0.0
@@ -977,6 +983,7 @@ class StokesTipCoalescence(Problem):
         # time, for any rheology or inertia; postProcess/make_case_video.py renders them.
         self.field_frames = bool(field_frames)
         self._n_field_frames = 0
+        self._last_field_frame_time: float | None = None
         self.h_tip_floor = float(h_tip_floor)
         self.smooth_half_window = int(smooth_half_window)
         self.smooth_tip_span = float(smooth_tip_span)
@@ -1628,6 +1635,7 @@ class StokesTipCoalescence(Problem):
             Oh=float("nan") if self.Oh is None else self.Oh,
         )
         self._n_field_frames += 1
+        self._last_field_frame_time = float(state["t"])
 
     def dump_interface_velocity(self, path: Path, state: dict[str, float]) -> None:
         """Diagnostic: interface nodes in arclength order with frame X, z and lab velocity."""
@@ -1849,7 +1857,7 @@ class StokesTipCoalescence(Problem):
                 if not all(math.isfinite(v) and v > 0 for v in (previous_rho, current_rho)):
                     raise RuntimeError("tip radius is invalid after Newton solve")
                 if not (self.tip_unresolved(previous_rho) or self.tip_unresolved(current_rho)):
-                    change = abs(current - previous) / max(abs(previous), 1e-300)
+                    change = self.curvature_change_ratio(previous, current)
                     if not math.isfinite(change) or change > self.curvature_step_limit:
                         raise RuntimeError(
                             f"tip curvature changed {change:.3g} in one step "
@@ -1973,11 +1981,33 @@ class StokesTipCoalescence(Problem):
                 raise RuntimeError("valid-state recovery remesh changed tip radius excessively")
 
     # ------------------------------------------------------------------ drive
+    @staticmethod
+    def curvature_change_ratio(previous: float, current: float) -> float:
+        """Measure curvature change relative to the neck or the unit drop's curvature.
+
+        The initial drop has radius one and twice mean curvature two in these
+        units. This gives absolute control near a flat neck while retaining
+        the relative control of a sharply curved meniscus.
+        """
+        if not all(math.isfinite(value) for value in (previous, current)):
+            raise RuntimeError("non-finite tip curvature")
+        return abs(current - previous) / max(abs(previous), 2.0)
+
+    def limit_dt_for_campaign(self, dt: float, st: dict[str, float]) -> float:
+        """Cap the attempted step without imposing a floor on the final remainder."""
+        if self.dt_max is not None:
+            dt = min(dt, self.dt_max)
+        if self.t_stop is not None:
+            dt = min(dt, self.t_stop - st["t"])
+        if not math.isfinite(dt) or dt <= 0:
+            raise ValueError("campaign timestep must be positive and finite")
+        return dt
+
     def choose_dt(self, st: dict[str, float]) -> float:
         """Step-size controller.
 
         Two ceilings: a fraction of the bridge-growth time ``R_min/u`` (quasi-steady
-        regime) and a PI-like adjustment that keeps the relative change of the neck
+        regime) and a PI-like adjustment that keeps the scaled change of the neck
         curvature per step near ``curvature_change_target``.  In the similarity
         regime ``|2H| ~ R_min**-3`` so both agree; during the initial reshaping of
         the meniscus the curvature criterion dominates and shortens the step.
@@ -2044,6 +2074,7 @@ class StokesTipCoalescence(Problem):
                 # such translation, so retain the curvature/bridge ceilings.
                 dt = self.limit_dt_after_history_reset(dt, st)
                 self._regrow = True
+            dt = self.limit_dt_for_campaign(dt, st)
             remesh_before_step = self.n_remesh
             fresh_at_start = self._fresh_mesh
             quality_remesh_used = False
@@ -2160,7 +2191,7 @@ class StokesTipCoalescence(Problem):
                     break
             if self.tip_refine and math.isfinite(st["tip_radius"]) and st["tip_radius"] > 0 and st["h_tip_now"] <= st["tip_radius"] / 4:
                 self.tip_radius_lagged = st["tip_radius"]  # trust the measurement only when resolved
-            self._last_curvature_ratio = abs(st["two_H"] - st_prev["two_H"]) / max(abs(st_prev["two_H"]), 1e-30)
+            self._last_curvature_ratio = self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
             iters = None
             try:
                 iters = int(self.get_last_newton_iterations())
@@ -2183,6 +2214,8 @@ class StokesTipCoalescence(Problem):
                     f"vol={st['volume']:.10e} remesh={self.n_remesh}",
                     flush=True,
                 )
+        if self.field_frames and self._last_field_frame_time != st["t"]:
+            self.write_field_frame(st)
         summary = {
             "status": status,
             "steps": self._steps,
@@ -2194,7 +2227,7 @@ class StokesTipCoalescence(Problem):
                 "R0": self.R0, "Z0": self.Z0, "n_tip": self.n_tip, "grading": self.grading,
                 "h_max": self.h_max, "remesh_growth": self.remesh_growth,
                 "tip_shrink_remesh": self.tip_shrink_remesh, "tip_grow_remesh": self.tip_grow_remesh,
-                "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial,
+                "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,
                 "max_residuals_cap": self.max_residuals_cap,

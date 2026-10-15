@@ -70,6 +70,70 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_curvature_control_is_finite_across_a_flat_neck(self) -> None:
+        ratio = StokesTipCoalescence.curvature_change_ratio
+        self.assertAlmostEqual(ratio(-1e16, -1.3e16), 0.3)
+        self.assertAlmostEqual(ratio(-0.04, 0.04), 0.04)
+        self.assertEqual(ratio(0.0, 2.0), 1.0)
+        for value in (float('nan'), float('inf')):
+            with self.assertRaisesRegex(RuntimeError, 'non-finite tip curvature'):
+                ratio(value, 1.0)
+
+    def test_curvature_sign_crossing_does_not_collapse_the_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out)
+            problem._dt = 1e-3
+            problem._last_curvature_ratio = problem.curvature_change_ratio(-1e-9, 1e-9)
+            with patch.object(problem, 'tip_unresolved', return_value=False):
+                dt = problem.choose_dt({'R_min': 1.0, 'u_neck': 0.1, 'tip_radius': 1.0})
+            self.assertGreater(dt, problem._dt)
+
+    def test_campaign_caps_actual_restart_steps_and_saves_the_endpoint(self) -> None:
+        for start in (9.99, 9.997):
+            with self.subTest(start=start), tempfile.TemporaryDirectory() as out:
+                problem = StokesTipCoalescence(
+                    R0=1e-6, Z0=5e-13, output_dir=out, dt_initial=0.004,
+                    dt_max=0.005, t_stop=10.0, R_stop=10.0, tip_map_alpha=0.5,
+                    neck_frame=True, neck_frame_moving=True,
+                    snapshot_dt=0.005, field_frames=True,
+                )
+                problem._restart = {'dt': 0.02}
+                live = {'t': start, 'R_min': 1.0, 'u_neck': 0.1, 'two_H': 1.0,
+                        'tip_radius': 1.0, 'volume': 4.18879, 'h_tip_now': 0.01}
+                attempted, frames = [], []
+
+                def solve(*, timestep, **kwargs):
+                    attempted.append(timestep)
+                    live['t'] += timestep
+
+                with patch.multiple(
+                    problem, is_initialised=Mock(return_value=True), refine_tip=Mock(),
+                    neck_state=Mock(side_effect=lambda: live.copy()), write_row=Mock(),
+                    write_profile=Mock(), interface_polyline=Mock(return_value=[]),
+                    ndof=Mock(return_value=0), choose_dt=Mock(return_value=0.02),
+                    _dof_snapshot=Mock(return_value={}), solve=Mock(side_effect=solve),
+                    write_snapshot=Mock(),
+                    write_field_frame=Mock(side_effect=lambda st: frames.append(st['t'])),
+                ):
+                    summary = problem.run_campaign(max_steps=3)
+                self.assertEqual(summary['status'], 'reached_t_stop')
+                self.assertEqual(summary['final']['t'], 10.0)
+                self.assertTrue(attempted)
+                self.assertLessEqual(max(attempted), 0.005)
+                if start == 9.997:
+                    self.assertLess(attempted[-1], problem.dt_initial)
+                self.assertEqual(frames[-1], 10.0)
+
+    def test_invalid_timestep_controls_do_not_create_output(self) -> None:
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'absent'
+            for options in ({'dt_initial': 0.0}, {'dt_initial': float('nan')},
+                            {'dt_max': float('inf')}, {'dt_initial': 0.01, 'dt_max': 0.005}):
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out, **options)
+                self.assertFalse(out.exists())
+
     def test_fresh_history_translation_cap_is_laboratory_frame_only(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             common = dict(R0=1e-6, Z0=5e-13, output_dir=out,

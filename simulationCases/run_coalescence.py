@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--h-max", type=float, default=0.1)
     ap.add_argument("--dt-fraction", type=float, default=0.02)
     ap.add_argument("--dt-initial", type=float, default=1e-9)
+    ap.add_argument("--dt-max", type=float, default=None, help="maximum timestep, including after a restart")
     ap.add_argument("--remesh-growth", type=float, default=1.5)
     ap.add_argument("--newton-tol", type=float, default=None, help="default 1e-7*(5e-7/Z0): the max-residual roundoff floor scales with the initial capillary pressure 1/Z0")
     ap.add_argument("--r-stop", type=float, default=0.03)
@@ -84,13 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--energy-budget", action="store_true", help="record kinetic energy, free-surface area and viscous dissipation in neck.csv")
     ap.add_argument("--extra-newton", type=int, default=0, help="retired: post-step Newton changes BDF history; nonzero values are rejected")
     ap.add_argument("--min-newton", type=int, default=0, help="minimum Newton iterations within each original time-discrete solve")
-    ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose relative tip curvature change exceeds this value; 0 disables")
+    ap.add_argument("--curvature-step-limit", type=float, default=0.0, help="reject a step whose scaled curvature change exceeds this value (unit-drop curvature floor); 0 disables")
     ap.add_argument("--neck-frame", action="store_true", help="radial mesh coordinate measured from the neck (NeckFrameAxisymmetric); requires --tip-map")
     ap.add_argument("--neck-frame-moving", action="store_true", help="solve the neck origin within each timestep; requires --neck-frame")
     ap.add_argument("--tip-rel-floor", type=float, default=0.0, help="smallest tip element relative to R_neck on the mapped mesh (double-precision solve floor); 0 = off")
     ap.add_argument("--interface-grading", type=float, default=0.0, help="tip-distance grading on the interface (mapped mesh); 0 = --grading")
     ap.add_argument("--interface-size-growth", type=float, default=0.3, help="growth of the element size with mapped distance from the interface")
-    ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target relative change of the neck curvature per step")
+    ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target scaled neck-curvature change per step (unit-drop curvature floor)")
     ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
     ap.add_argument("--restart-from", type=Path, default=None, help="restart/remesh_NNNN.npz written by an earlier moving-frame run")
     ap.add_argument("--zone-grading", type=float, default=0.0, help="finer grading between --zone-inner and --zone-outer neck radii from the tip (0 = off)")
@@ -117,6 +118,7 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         h_max=args.h_max,
         dt_fraction=args.dt_fraction,
         dt_initial=args.dt_initial,
+        dt_max=args.dt_max,
         remesh_growth=args.remesh_growth,
         newton_tolerance=newton_tol,
         R_stop=args.r_stop,
@@ -158,6 +160,12 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    import math
+    if not math.isfinite(args.dt_initial) or args.dt_initial <= 0:
+        raise SystemExit("--dt-initial must be positive and finite")
+    if args.dt_max is not None and (not math.isfinite(args.dt_max) or args.dt_max < args.dt_initial):
+        raise SystemExit("--dt-max must be finite and at least --dt-initial")
 
     case = json.loads(args.case.read_text())
     validate_case(case)
