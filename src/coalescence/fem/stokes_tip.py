@@ -191,6 +191,30 @@ def fit_circle_kasa(points) -> tuple[tuple[float, float], float] | None:
     return (float(cx * scale + x0[0]), float(cy * scale + x0[1])), float(math.sqrt(r2) * scale)
 
 
+def tip_fit_indices(r, z, i0: int, angle_limit: float, z_apex: float) -> list[int]:
+    """Select the first local chord-angle lobe, excluding unresolved apex nodes."""
+    distance2 = (r - r[i0]) ** 2 + (z - z[i0]) ** 2
+    order = sorted(range(len(r)), key=lambda i: distance2[i])
+    near = [i0]
+    last_angle = None
+    for i in order:
+        height = z[i] - z[i0]
+        if i == i0 or height <= 0:
+            continue
+        angle = math.atan2(abs(r[i] - r[i0]), height)
+        if angle > angle_limit:
+            break
+        if height < z_apex:
+            continue
+        # Once the first lobe turns back, distant parts of the drop must not
+        # enter merely because their chords again lie below the angle limit.
+        if last_angle is not None and angle < last_angle:
+            break
+        near.append(i)
+        last_angle = angle
+    return near if len(near) >= 7 else order[:min(7, len(r))]
+
+
 def circle_through(p0, p1, p2) -> tuple[tuple[float, float], float] | None:
     """Centre and radius of the circle through three points, or None if collinear."""
     ax, ay = p0
@@ -1050,6 +1074,11 @@ class StokesTipCoalescence(Problem):
         if self.curvature_step_limit < 0:
             raise ValueError("curvature_step_limit must be non-negative")
         self._step_state_before_newton = None
+        self._last_tip_fit_support = None
+        self._last_tip_fit_curvature: float | None = None
+        self._step_tip_fit_support = None
+        self._step_tip_fit_curvature: float | None = None
+        self._trial_curvature_ratio: float | None = None
         # Apex zone (in lagged tip radii) whose nodes are noise-dominated: excluded from the
         # tip fit and replaced by the exact circle through the apex at each remesh.
         self.tip_apex_zone = float(tip_apex_zone)
@@ -1480,24 +1509,15 @@ class StokesTipCoalescence(Problem):
         # on a circle, at least seven nodes.  A fixed node count spans a thousandth of a tip
         # radius on the mapped mesh, and a window in lagged radii collapses once the
         # tip radius grows again as R_min^3 (5.6e-14 was read for a 1.4e-12 tip).
-        near = [i0]
         # Nodes within tip_apex_zone lagged radii of the apex carry position noise larger
         # than their sagitta (at R0=1e-6, ~1e-18 solver units against ~1e-23) and are
         # excluded from the fit.
         z_apex = self.tip_apex_zone * self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
-        for i in order[1:]:
-            # Walk outwards in distance and stop at the first node beyond the angle; nodes
-            # far up the drop near the axis have |r - R_min| small and must not qualify.
-            # Nodes at or below the tip level (other plane nodes) are skipped, not fatal.
-            if z[i] - p0[1] <= 0.0:
-                continue
-            if math.atan2(abs(r[i] - p0[0]), z[i] - p0[1]) > self.tip_fit_angle:
-                break
-            if z[i] - p0[1] < z_apex:
-                continue
-            near.append(i)
-        if len(near) < 7:
-            near = order[: min(7, n)]
+        support = self._step_tip_fit_support
+        if support is not None and support[:2] == (self.n_remesh, n):
+            near = support[2]
+        else:
+            near = tip_fit_indices(r, z, i0, self.tip_fit_angle, z_apex)
         p1 = (float(r[order[1]]), float(z[order[1]]))
         circ = fit_circle_kasa([(float(r[i]), float(z[i])) for i in near])
         if circ is None:
@@ -1508,6 +1528,9 @@ class StokesTipCoalescence(Problem):
             tip_radius = rho
             kappa_m = -1.0 / rho if cx > p0[0] else 1.0 / rho
         two_h = kappa_m + 1.0 / rmin
+        if support is None or support[:2] != (self.n_remesh, n):
+            self._last_tip_fit_support = (self.n_remesh, n, tuple(near))
+            self._last_tip_fit_curvature = two_h
         h_tip_now = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
         vol = float(self.get_mesh("drop").evaluate_observable("volume"))
         return {
@@ -1849,7 +1872,8 @@ class StokesTipCoalescence(Problem):
             # quality remesh at R=1.718e-6).  The geometry and Newton gates still apply.
             if (self.curvature_step_limit > 0 and self._step_state_before_newton is not None
                     and not self._fresh_mesh):
-                previous = self._step_state_before_newton["two_H"]
+                previous = (self._step_tip_fit_curvature if self._step_tip_fit_curvature is not None
+                            else self._step_state_before_newton["two_H"])
                 current_state = self.neck_state()
                 current = current_state["two_H"]
                 previous_rho = self._step_state_before_newton["tip_radius"]
@@ -1858,6 +1882,7 @@ class StokesTipCoalescence(Problem):
                     raise RuntimeError("tip radius is invalid after Newton solve")
                 if not (self.tip_unresolved(previous_rho) or self.tip_unresolved(current_rho)):
                     change = self.curvature_change_ratio(previous, current)
+                    self._trial_curvature_ratio = change
                     if not math.isfinite(change) or change > self.curvature_step_limit:
                         raise RuntimeError(
                             f"tip curvature changed {change:.3g} in one step "
@@ -2080,6 +2105,11 @@ class StokesTipCoalescence(Problem):
             quality_remesh_used = False
             for _attempt in range(6):
                 snapshot = self._dof_snapshot()
+                # Compare the time-discrete states on one fit support. A
+                # support-selection change is not physical curvature evolution.
+                self._step_tip_fit_support = self._last_tip_fit_support
+                self._step_tip_fit_curvature = self._last_tip_fit_curvature
+                self._trial_curvature_ratio = None
                 self._dt = dt
                 self._predict_now = True
                 self._step_state_before_newton = st
@@ -2157,6 +2187,8 @@ class StokesTipCoalescence(Problem):
                 finally:
                     self._predict_now = False
                     self._step_state_before_newton = None
+                    self._step_tip_fit_support = None
+                    self._step_tip_fit_curvature = None
                     if self._newton_tolerance_before_gate is not None:
                         self.newton_solver_tolerance = self._newton_tolerance_before_gate
             if not ok:
@@ -2191,7 +2223,10 @@ class StokesTipCoalescence(Problem):
                     break
             if self.tip_refine and math.isfinite(st["tip_radius"]) and st["tip_radius"] > 0 and st["h_tip_now"] <= st["tip_radius"] / 4:
                 self.tip_radius_lagged = st["tip_radius"]  # trust the measurement only when resolved
-            self._last_curvature_ratio = self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
+            self._last_curvature_ratio = (
+                self._trial_curvature_ratio if self._trial_curvature_ratio is not None
+                else self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
+            )
             iters = None
             try:
                 iters = int(self.get_last_newton_iterations())

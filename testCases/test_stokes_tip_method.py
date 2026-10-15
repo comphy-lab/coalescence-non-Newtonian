@@ -13,7 +13,7 @@ from scipy.sparse import csr_matrix
 
 from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
-    StokesTipCoalescence, shallow_interface_refinement_points, validate_upper_interface,
+    StokesTipCoalescence, shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
@@ -70,6 +70,45 @@ class TipMapTests(unittest.TestCase):
 
 
 class NewtonGateTests(unittest.TestCase):
+    def test_tip_fit_does_not_reenter_the_distant_chord_angle_lobe(self) -> None:
+        import numpy as np
+        z = np.linspace(0.0, 2.0, 41)
+        amplitude = math.tan(0.15) / (0.5 * math.exp(-0.5))
+        r = amplitude * z**2 * np.exp(-2.0 * z**2)
+        for perturbation in (-1e-14, 0.0, 1e-14):
+            changed = r.copy()
+            changed[10] += perturbation
+            support = tip_fit_indices(changed, z, 0, 0.15, 0.05)
+            self.assertGreaterEqual(len(support), 7)
+            self.assertLessEqual(max(support), 10)
+
+    def test_step_curvature_uses_matched_support_at_an_angle_threshold(self) -> None:
+        import numpy as np
+        z = np.linspace(0.0, 2.0, 41)
+        amplitude = math.tan(0.15) / (0.5 * math.exp(-0.5))
+        r = amplitude * z**2 * np.exp(-2.0 * z**2)
+        changed = r.copy()
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(R0=1e-6, Z0=5e-13, output_dir=out)
+            problem.tip_radius_lagged = 1.0
+            mesh = Mock()
+            mesh.evaluate_observable.return_value = 4.18879
+            with patch.object(problem, '_interface_nodes',
+                              side_effect=lambda: (None, changed, z, np.zeros(len(z)), np.zeros(len(z)))), patch.object(
+                problem, '_frame_shift_now', return_value=1.0
+            ), patch.object(problem, 'get_mesh', return_value=mesh), patch.object(
+                problem, 'get_current_time', return_value=0.0
+            ):
+                before = problem.neck_state()
+                problem._step_tip_fit_support = problem._last_tip_fit_support
+                frozen = problem._step_tip_fit_support
+                for perturbation in (-1e-14, 1e-14):
+                    changed[10] = r[10] + perturbation
+                    after = problem.neck_state()
+                    self.assertEqual(problem._step_tip_fit_support, frozen)
+                    self.assertLess(after['kappa_m'], 0.0)
+                    self.assertLess(problem.curvature_change_ratio(before['two_H'], after['two_H']), 1e-6)
+
     def test_curvature_control_is_finite_across_a_flat_neck(self) -> None:
         ratio = StokesTipCoalescence.curvature_change_ratio
         self.assertAlmostEqual(ratio(-1e16, -1.3e16), 0.3)
