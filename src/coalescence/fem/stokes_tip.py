@@ -717,27 +717,34 @@ class MappedTipMesh(GmshTemplate):
             poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
             # Apex zone: the nodes within tip_apex_zone lagged radii of the apex are noise
             # dominated (see neck_state); replace them by the circle through the apex, with
-            # centre on the symmetry plane, that passes exactly through the first vertex beyond
-            # the zone (chord construction), so the fresh mesh starts from a clean apex.
-            z_apex = pb.tip_apex_zone * pb.tip_radius_lagged
+            # centre on the symmetry plane, that passes exactly through the last Q2 vertex
+            # inside the zone (chord construction). Without such a vertex, retain the Q2 curve.
+            # Noise repair must stay local when a flat meridian makes its
+            # fitted radius large. Resolved macroscopic Q2 geometry is data.
+            z_apex = min(pb.tip_apex_zone * pb.tip_radius_lagged, pb.h_max)
+            pb._apex_arc = {}
             j = 0
-            while j + 2 < len(poly) and poly[j][1] < z_apex:
+            while j + 2 < len(poly) and 0.0 < poly[j + 2][1] <= z_apex:
                 j += 2
+            pieces = self._q2_pieces(poly)
             if j > 0 and pb.neck_frame:
                 xt = poly[0][0]
                 xj, zj = poly[j]
                 dx = xj - xt
-                if dx > 0.0:
+                # dx > zj puts the endpoint beyond the circle's highest point:
+                # that arc would rise above the join even though the join is capped.
+                if 0.0 < dx <= zj:
                     rc = (dx * dx + zj * zj) / (2.0 * dx)
                     cx = xt + rc
                     theta_j = math.atan2(zj, xj - cx)
-                    apex = self._arc_piece(cx, 0.0, rc, math.pi, theta_j)
-                    pieces = [apex] + self._q2_pieces(poly[j:])
-                    pb._apex_arc = {"nodes_replaced": j, "radius": rc, "z_apex": z_apex}
-                else:
-                    pieces = self._q2_pieces(poly)
-            else:
-                pieces = self._q2_pieces(poly)
+                    max_height = rc * math.sin(theta_j)
+                    if (math.isfinite(cx) and math.isfinite(rc) and rc > 0.0
+                            and math.pi / 2 <= theta_j < math.pi
+                            and 0.0 < max_height <= z_apex):
+                        apex = self._arc_piece(cx, 0.0, rc, math.pi, theta_j)
+                        pieces = [apex] + self._q2_pieces(poly[j:])
+                        pb._apex_arc = {"nodes_replaced": j, "radius": rc, "z_apex": z_apex,
+                                        "join_height": zj, "max_height": max_height}
             kind = "restart" if restarting else "remesh"
         T = r_neck                                  # tip in frame coordinates (solver units)
         r_neck_phys = r_neck * S + shift
@@ -804,6 +811,8 @@ class MappedTipMesh(GmshTemplate):
             cap = h_max * (dp / L) ** expo
             if b != a:
                 cap = min(cap, h_max * A * (dp / A) ** expo_o)
+            if self._linear_core_d > 0:
+                cap = min(cap, h_max * self._linear_core_g / self._linear_core_d)
             graded = (ks if on_interface else k) * dp
             if kz:
                 graded = min(graded, zone_size(dp))
@@ -835,7 +844,9 @@ class MappedTipMesh(GmshTemplate):
         self.default_resolution = h_max
         self.set_gmsh_parameter("General.NumThreads", 1)
         self.set_gmsh_parameter("Geometry.Tolerance", 1e-15)
-        self.set_gmsh_parameter("Mesh.MeshSizeMin", h_tip_p)
+        # The curvature-derived target may exceed the physical cap near a
+        # flat neck. Only the precision floor is a global lower bound.
+        self.set_gmsh_parameter("Mesh.MeshSizeMin", h_floor_p)
         self.set_gmsh_parameter("Mesh.MeshSizeMax", 10.0 * h_max)
         self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", 0)
         self.set_gmsh_parameter("Mesh.MeshSizeFromPoints", 0)
@@ -864,6 +875,8 @@ class MappedTipMesh(GmshTemplate):
         cap_expr = f"{h_max!r}*({dclamp}/{L!r})^({expo!r})"
         if b != a:
             cap_expr = f"min({cap_expr}, {h_max * A!r}*({dclamp}/{A!r})^({expo_o!r}))"
+        if self._linear_core_d > 0:
+            cap_expr = f"min({cap_expr}, {h_max * self._linear_core_g / self._linear_core_d!r})"
         size_expr = f"min({cap_expr}, max({h_tip_p!r}, {k!r}*F{dist}))"
         if ks < k:
             # Distance to the interface control points (spaced f_ctrl of the local interface
@@ -1149,7 +1162,7 @@ class StokesTipCoalescence(Problem):
     # ------------------------------------------------------------------ mesh
     def current_h_tip(self) -> float:
         floor = self.gmsh_floor if self.tip_refine else self.h_tip_floor
-        return max(self.tip_radius_lagged / self.n_tip, floor)
+        return max(min(self.tip_radius_lagged / self.n_tip, self.h_max), floor)
 
     def rho_resolvable(self) -> float:
         """Smallest tip radius the mapped mesh can resolve with n_tip elements, given the

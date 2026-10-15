@@ -20,6 +20,94 @@ from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):
+    def test_late_mapped_geometry_honours_physical_size_and_local_apex(self) -> None:
+        import itertools
+        import numpy as np
+
+        pole = math.sqrt(0.2 + math.sqrt(2.04))
+        z = np.linspace(0.0, pole, 65)
+        coarse_concave = list(zip(0.2 * z**2 - 0.5 * z**4, z))
+        fine_z = np.linspace(0.0, pole, 257)
+        fine_concave = list(zip(0.2 * fine_z**2 - 0.5 * fine_z**4, fine_z))
+        angle = np.linspace(0.0, math.pi / 2, 65)
+        convex = list(zip(np.cos(angle) - 1.0, np.sin(angle)))
+        overshooting = [(0.0, 0.0), (0.02, 0.005), (0.04, 0.01), (0.05, 0.505), (-1.0, 1.0)]
+        tiny_radius = 5e-13
+        tiny_neck = [(tiny_radius * (1 - math.cos(a)), tiny_radius * math.sin(a))
+                     for a in (0.0, 0.02, 0.04)] + [(0.001, 0.5), (-1.0, 1.0)]
+        fixtures = (("coarse concave", coarse_concave, False, 8.0),
+                    ("fine concave", fine_concave, True, 8.0),
+                    ("convex", convex, False, 8.0),
+                    ("overshooting arc", overshooting, False, 8.0),
+                    ("tiny neck", tiny_neck, True, tiny_radius))
+        for name, poly, has_apex_arc, radius in fixtures:
+            with self.subTest(geometry=name), tempfile.TemporaryDirectory() as out:
+                poly = [*poly[:-1], (-1.0, poly[-1][1])]
+                problem = StokesTipCoalescence(
+                    R0=1e-6, Z0=5e-13, output_dir=out, h_max=0.02,
+                    spatial_scale=1e-6, tip_map_alpha=0.5, tip_map_outer=0.4,
+                    tip_map_linear_core=1.0, neck_frame=True, neck_frame_moving=True,
+                )
+                problem.restart_poly = poly
+                problem.frame_shift_phys = 1.0
+                problem.tip_radius_lagged = radius
+                problem._apex_arc = {'stale': True}
+                mesh = MappedTipMesh()
+                callbacks, parameters, curves = [], {}, []
+
+                def control_points(pieces, scale, size_at, **kwargs):
+                    callbacks.append(size_at)
+                    curves.append(pieces)
+                    return [mesh._fwd(*(x / scale for x in pieces[0](0.0))),
+                            mesh._fwd(*(x / scale for x in pieces[-1](1.0)))]
+
+                with patch.multiple(
+                    mesh, get_problem=Mock(return_value=problem), is_first_time=Mock(return_value=True),
+                    _control_points=Mock(side_effect=control_points),
+                    set_gmsh_parameter=Mock(side_effect=lambda k, v: parameters.__setitem__(k, v)),
+                    point=Mock(side_effect=itertools.count()), spline=Mock(), line=Mock(),
+                    plane_surface=Mock(), add_mesh_size_field=Mock(side_effect=itertools.count()),
+                    set_mesh_size_background_field=Mock(),
+                ):
+                    mesh.define_geometry()
+                if radius == 8.0:
+                    self.assertEqual(problem.current_h_tip(), problem.h_max)
+                for distance in (0.01, 0.1, 1.0):
+                    mapped = mesh._fwd(mesh._T + distance / problem.S, 0.0)
+                    dp = math.hypot(mapped[0] - mesh._T, mapped[1])
+                    request = callbacks[0](mapped)
+                    physical_chord = request * distance / dp
+                    self.assertLessEqual(physical_chord, problem.tip_map_control_fraction * problem.h_max * (1 + 1e-12))
+                    self.assertLessEqual(parameters['Mesh.MeshSizeMin'], request / problem.tip_map_control_fraction)
+                if has_apex_arc:
+                    receipt = problem._apex_arc
+                    cap = min(problem.tip_apex_zone * radius, problem.h_max)
+                    self.assertEqual(receipt['z_apex'], cap)
+                    join = receipt['nodes_replaced']
+                    self.assertGreater(join, 0)
+                    self.assertEqual(join % 2, 0)
+                    self.assertEqual(receipt['join_height'], poly[join][1])
+                    self.assertLessEqual(receipt['join_height'], cap)
+                    self.assertLessEqual(receipt['max_height'], cap)
+                    apex = curves[0][0]
+                    heights = [apex(t)[1] for t in np.linspace(0.0, 1.0, 257)]
+                    self.assertLessEqual(max(heights), cap)
+                    self.assertEqual(max(heights), receipt['max_height'])
+                    for actual, expected in zip(apex(1.0), poly[join]):
+                        self.assertAlmostEqual(actual / radius, expected / radius)
+                    expected_tail = mesh._q2_pieces(poly[join:])
+                    self.assertEqual(len(curves[0]), 1 + len(expected_tail))
+                    for actual, expected in zip(curves[0][1:], expected_tail):
+                        for t in np.linspace(0.0, 1.0, 17):
+                            self.assertEqual(actual(t), expected(t))
+                else:
+                    self.assertEqual(problem._apex_arc, {})
+                    expected_q2 = mesh._q2_pieces(poly)
+                    self.assertEqual(len(curves[0]), len(expected_q2))
+                    for actual, expected in zip(curves[0], expected_q2):
+                        for t in np.linspace(0.0, 1.0, 17):
+                            self.assertEqual(actual(t), expected(t))
+
     def test_signed_q2_jacobian_catches_midside_fold_with_unchanged_vertices(self) -> None:
         import numpy as np
 
