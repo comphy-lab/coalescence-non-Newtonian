@@ -194,6 +194,9 @@ def main() -> int:
     import pyoomph
 
     manifest = {
+        "schema": "pyoomph-runner-manifest-v1",
+        "runner": {"path": str(Path(__file__).resolve()),
+                   "sha256": hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()},
         "case_file": str(args.case),
         "case_sha256": hashlib.sha256(args.case.read_bytes()).hexdigest(),
         "case_id": case["case_id"],
