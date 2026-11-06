@@ -981,6 +981,8 @@ class StokesTipCoalescence(Problem):
         t_stop: float | None = None,
         snapshot_dt: float | None = None,
         field_frames: bool = False,
+        recover_signed_jacobian: bool = False,
+        quality_remesh_ratio: float = 0.0,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1107,6 +1109,20 @@ class StokesTipCoalescence(Problem):
             raise ValueError("zone_grading must be >= 0 and 0 < zone_inner < zone_outer")
         if self.interface_grading < 0 or self.interface_size_growth <= 0:
             raise ValueError("interface_grading must be >= 0 and interface_size_growth > 0")
+        # Element-quality safeguards for the moving frame (both off by default, which keeps
+        # earlier runs reproducible).  At low Oh a sharp capillary rim crest forms within a few
+        # tip radii of the neck and its Q2 elements can fold between the growth/tip remeshes.
+        # recover_signed_jacobian: a step rejected because a Q2 element folded restores the
+        # valid pre-step state and remeshes it, as for a bulk node leaving the quadrant.
+        # quality_remesh_ratio: remesh after an accepted step once the worst element's
+        # min/max signed-Jacobian ratio falls below this value (1 for an affine element),
+        # provided the fresh mesh started above it (no remesh-every-step loop).
+        self.recover_signed_jacobian = bool(recover_signed_jacobian)
+        self.quality_remesh_ratio = float(quality_remesh_ratio)
+        if not (math.isfinite(self.quality_remesh_ratio) and 0.0 <= self.quality_remesh_ratio < 1.0):
+            raise ValueError("quality_remesh_ratio must lie in [0, 1)")
+        self.min_jacobian_ratio = float("nan")
+        self._jacobian_ratio_at_remesh = float("nan")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -1349,6 +1365,7 @@ class StokesTipCoalescence(Problem):
         for node in self.get_mesh("drop/axis").nodes():
             if abs(self.S * node.x(0) + shift) > tolerance:
                 raise InvalidMovingFrameGeometry("axis", "moving-frame axis node left r=0")
+        worst_ratio = float("inf")
         for element in self.get_mesh("drop").elements():
             if element.nnode() != 6:
                 raise InvalidMovingFrameGeometry("element_type", "moving-frame geometry gate expects six-node Q2 triangles")
@@ -1361,12 +1378,18 @@ class StokesTipCoalescence(Problem):
             tolerance_j = 100 * numpy.finfo(float).eps * max(abs(ref_min), abs(ref_max))
             if ref_min > tolerance_j:
                 valid = cur_min > tolerance_j
+                ratio = cur_min / cur_max if valid else 0.0
             elif ref_max < -tolerance_j:
                 valid = cur_max < -tolerance_j
+                ratio = cur_max / cur_min if valid else 0.0
             else:
                 raise InvalidMovingFrameGeometry("reference_jacobian", "moving-frame reference Q2 element is singular or folded")
             if not valid:
                 raise InvalidMovingFrameGeometry("signed_jacobian", "moving-frame Q2 element has a nonpositive signed Jacobian")
+            worst_ratio = min(worst_ratio, ratio)
+        # Worst element shape on the accepted geometry: min/max of the signed Jacobian over
+        # the element (1 for an affine element, 0 at folding).
+        self.min_jacobian_ratio = worst_ratio
 
     def _snap_moving_axis(self, radius: float | None = None) -> None:
         """Put mapped axis nodes and their reference coordinates exactly at r=0."""
@@ -1907,10 +1930,49 @@ class StokesTipCoalescence(Problem):
                 self._domains_to_remesh.add(self._template)
         super().actions_after_newton_solve()
 
+    def _is_recoverable_geometry(self, exc: BaseException) -> bool:
+        """Rejected trials whose valid pre-step state may be restored and remeshed."""
+        kinds = ("bulk_quadrant", "signed_jacobian") if self.recover_signed_jacobian else ("bulk_quadrant",)
+        return ((isinstance(exc, InvalidMovingFrameGeometry) and exc.kind in kinds)
+                or isinstance(exc, HiddenInterfacePlaneCrossing))
+
+    @staticmethod
+    def _recovery_reason(exc: BaseException) -> str:
+        """remesh.jsonl reason for a valid-state recovery, naming the rejected geometry."""
+        if isinstance(exc, HiddenInterfacePlaneCrossing):
+            return "valid-state recovery after rejected hidden-Q2 interface trial"
+        kind = getattr(exc, "kind", "bulk_quadrant").replace("_", "-")
+        return f"valid-state recovery after rejected {kind} trial"
+
+    def _record_quality_baseline(self) -> None:
+        """Reference shape of an initial or restarted mesh, measured on the valid pre-step geometry.
+
+        A remesh records its own reference in actions_after_remeshing; this covers the mesh the run
+        starts from, so that a first step which already degrades it can still trigger the remesh.
+        """
+        if (self.quality_remesh_ratio > 0.0 and self.neck_frame_moving
+                and not math.isfinite(self._jacobian_ratio_at_remesh)):
+            self.validate_domain_geometry()
+            self._jacobian_ratio_at_remesh = self.min_jacobian_ratio
+
+    def _quality_remesh_reason(self) -> str | None:
+        """Element-quality trigger: the worst element folded towards zero since the remesh."""
+        if self.quality_remesh_ratio <= 0.0 or not self.neck_frame_moving:
+            return None
+        ratio, fresh = self.min_jacobian_ratio, self._jacobian_ratio_at_remesh
+        if not (math.isfinite(ratio) and math.isfinite(fresh)):
+            return None
+        if ratio < self.quality_remesh_ratio <= fresh:
+            return f"element quality: min Jacobian ratio {ratio:.3g} < {self.quality_remesh_ratio:.3g} (fresh mesh {fresh:.3g})"
+        return None
+
     def _remesh_reason(self) -> str | None:
         st = self.neck_state()
         self.last_rmin = st["R_min"]
         rho = st["tip_radius"]
+        quality = self._quality_remesh_reason()
+        if quality is not None:
+            return quality
         if self._steps - self._step_at_remesh < 3:
             return None
         if st["R_min"] >= self.remesh_growth * self.rmin_at_remesh:
@@ -1967,6 +2029,7 @@ class StokesTipCoalescence(Problem):
         super().actions_after_remeshing()
         self._snap_moving_axis()
         self.validate_domain_geometry()
+        self._jacobian_ratio_at_remesh = self.min_jacobian_ratio
         # Stokes carries no velocity history, and the interpolated position history of a
         # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
         # mesh velocity.  Restart the time integrator impulsively from the new geometry
@@ -1989,6 +2052,7 @@ class StokesTipCoalescence(Problem):
             "after": st_new,
             "mesh": self._mesh_receipt,
             "ndof": int(self.ndof()),
+            "min_jacobian_ratio_after": self.min_jacobian_ratio if math.isfinite(self.min_jacobian_ratio) else None,
         }
         self._pending_remesh_reason = None
         # Interface before (old mesh nodes) and after (new mesh nodes) for geometric audit.
@@ -2115,6 +2179,7 @@ class StokesTipCoalescence(Problem):
             dt = self.limit_dt_for_campaign(dt, st)
             remesh_before_step = self.n_remesh
             fresh_at_start = self._fresh_mesh
+            self._record_quality_baseline()
             quality_remesh_used = False
             for _attempt in range(6):
                 snapshot = self._dof_snapshot()
@@ -2143,10 +2208,7 @@ class StokesTipCoalescence(Problem):
                     except Exception as diag_exc:
                         print(f"residual diagnosis unavailable: {diag_exc!r}", flush=True)
                     self._predict_now = False
-                    recoverable_geometry = (
-                        (isinstance(exc, InvalidMovingFrameGeometry) and exc.kind == "bulk_quadrant")
-                        or isinstance(exc, HiddenInterfacePlaneCrossing)
-                    )
+                    recoverable_geometry = self._is_recoverable_geometry(exc)
                     if (recoverable_geometry
                             and self.neck_frame_moving and not quality_remesh_used
                             and self._template is not None):
@@ -2156,11 +2218,7 @@ class StokesTipCoalescence(Problem):
                             valid_poly = self.interface_polyline()
                             validate_upper_interface(valid_poly, self.R0)
                             valid_state = self.neck_state()
-                            self._pending_remesh_reason = (
-                                "valid-state recovery after rejected hidden-Q2 interface trial"
-                                if isinstance(exc, HiddenInterfacePlaneCrossing)
-                                else "valid-state recovery after rejected bulk-quadrant trial"
-                            )
+                            self._pending_remesh_reason = self._recovery_reason(exc)
                             old_generation = self.n_remesh
                             if not self.force_remesh({self._template}) or self.n_remesh != old_generation + 1:
                                 raise RuntimeError("valid-state quality remesh did not replace the mesh")
@@ -2275,6 +2333,8 @@ class StokesTipCoalescence(Problem):
                 "R0": self.R0, "Z0": self.Z0, "n_tip": self.n_tip, "grading": self.grading,
                 "h_max": self.h_max, "remesh_growth": self.remesh_growth,
                 "tip_shrink_remesh": self.tip_shrink_remesh, "tip_grow_remesh": self.tip_grow_remesh,
+                "recover_signed_jacobian": self.recover_signed_jacobian,
+                "quality_remesh_ratio": self.quality_remesh_ratio,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,

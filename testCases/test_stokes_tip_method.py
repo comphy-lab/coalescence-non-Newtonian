@@ -297,6 +297,120 @@ class NewtonGateTests(unittest.TestCase):
                     problem.validate_domain_geometry()
                 self.assertEqual(caught.exception.kind, "bulk_quadrant")
 
+    def _moving_problem(self, out, **kwargs):
+        return StokesTipCoalescence(
+            R0=1e-4, Z0=5e-9, output_dir=out, spatial_scale=1e-4,
+            tip_map_alpha=0.5, h_tip_floor=1e-30, neck_frame=True, neck_frame_moving=True, **kwargs,
+        )
+
+    def test_quality_safeguards_are_off_by_default_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out)
+            self.assertFalse(problem.recover_signed_jacobian)
+            self.assertEqual(problem.quality_remesh_ratio, 0.0)
+            folded = InvalidMovingFrameGeometry("signed_jacobian", "folded")
+            self.assertFalse(problem._is_recoverable_geometry(folded))
+            self.assertTrue(problem._is_recoverable_geometry(InvalidMovingFrameGeometry("bulk_quadrant", "out")))
+            self.assertTrue(problem._is_recoverable_geometry(HiddenInterfacePlaneCrossing(0, -1e-20)))
+            problem.min_jacobian_ratio, problem._jacobian_ratio_at_remesh = 0.01, 0.8
+            problem._steps, problem._step_at_remesh = 10, 0
+            self.assertIsNone(problem._quality_remesh_reason())
+            for bad in (-0.1, 1.0, float("nan")):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, quality_remesh_ratio=bad)
+
+    def test_signed_jacobian_is_recoverable_only_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, recover_signed_jacobian=True)
+            self.assertTrue(problem._is_recoverable_geometry(InvalidMovingFrameGeometry("signed_jacobian", "folded")))
+            self.assertFalse(problem._is_recoverable_geometry(InvalidMovingFrameGeometry("axis", "off axis")))
+            self.assertFalse(problem._is_recoverable_geometry(RuntimeError("OomphException")))
+
+    def test_quality_remesh_triggers_only_after_degradation_from_a_good_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, quality_remesh_ratio=0.3)
+            problem.min_jacobian_ratio = 0.2          # no reference yet: never triggers on its own
+            self.assertIsNone(problem._quality_remesh_reason())
+            problem._jacobian_ratio_at_remesh = 0.7
+            problem.min_jacobian_ratio = 0.31
+            self.assertIsNone(problem._quality_remesh_reason())
+            problem.min_jacobian_ratio = 0.2
+            self.assertIn("element quality", problem._quality_remesh_reason())
+            problem._jacobian_ratio_at_remesh = 0.25  # fresh mesh already below: no remesh loop
+            self.assertIsNone(problem._quality_remesh_reason())
+            problem._jacobian_ratio_at_remesh = 0.7
+            problem._steps = problem._step_at_remesh  # first accepted step after a remesh is eligible
+            with patch.object(problem, "neck_state", return_value={"R_min": 1e-4, "tip_radius": 1e-9}):
+                self.assertIn("element quality", problem._remesh_reason())
+
+    def test_quality_baseline_is_the_pre_step_mesh_so_a_first_step_crossing_triggers(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, quality_remesh_ratio=0.3)
+
+            def gate(value):
+                return lambda: setattr(problem, "min_jacobian_ratio", value)
+
+            with patch.object(problem, "validate_domain_geometry", side_effect=gate(0.7)) as geometry:
+                problem._record_quality_baseline()      # initial mesh, before the first solve
+                problem._record_quality_baseline()      # already recorded: not re-measured
+            geometry.assert_called_once()
+            self.assertEqual(problem._jacobian_ratio_at_remesh, 0.7)
+            problem.min_jacobian_ratio = 0.2           # the first step degrades it below the threshold
+            self.assertIn("element quality", problem._quality_remesh_reason())
+            off = self._moving_problem(out)
+            with patch.object(off, "validate_domain_geometry") as geometry:
+                off._record_quality_baseline()
+            geometry.assert_not_called()               # default runs are untouched
+
+    def test_recovery_reasons_name_the_rejected_geometry(self) -> None:
+        reason = StokesTipCoalescence._recovery_reason
+        self.assertEqual(reason(InvalidMovingFrameGeometry("bulk_quadrant", "out")),
+                         "valid-state recovery after rejected bulk-quadrant trial")
+        self.assertEqual(reason(InvalidMovingFrameGeometry("signed_jacobian", "folded")),
+                         "valid-state recovery after rejected signed-jacobian trial")
+        self.assertEqual(reason(HiddenInterfacePlaneCrossing(0, -1e-20)),
+                         "valid-state recovery after rejected hidden-Q2 interface trial")
+
+    def test_geometry_gate_records_worst_jacobian_ratio(self) -> None:
+        import numpy as np
+
+        local = [(0, 0), (1, 0), (0, 1), (0.5, 0), (0.5, 0.5), (0, 0.5)]
+
+        def element(coords):
+            nodes = []
+            for k, current in enumerate(coords):          # reference geometry: the unit triangle
+                node = Mock()
+                node.x.side_effect = lambda i, c=current: c[i]
+                node.x_lagr.side_effect = lambda i, k=k: local[k][i]
+                nodes.append(node)
+            e = Mock()
+            e.nnode.return_value = 6
+            e.local_coordinate_of_node.side_effect = lambda i: local[i]
+            e.node_pt.side_effect = lambda i: nodes[i]
+            return e
+
+        affine = element([(2 * x + 1.0, 2 * y + 1.0) for x, y in local])
+        bent = [(x + 1.0, y + 1.0) for x, y in local]
+        bent[3] = (1.5, 1.2)                          # mid-side node pushed inwards, still valid
+        curved = element(bent)
+        drop, axis = Mock(), Mock()
+        drop.nodes.return_value, axis.nodes.return_value = [], []
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out)
+            for elements, expected in (([affine], 1.0), ([affine, curved], None)):
+                drop.elements.return_value = elements
+                with patch.object(problem, "_frame_shift_now", return_value=1e-4), patch.object(
+                    problem, "get_mesh", side_effect=lambda name: axis if name == "drop/axis" else drop
+                ):
+                    problem.validate_domain_geometry()
+                if expected is not None:
+                    self.assertAlmostEqual(problem.min_jacobian_ratio, expected)
+                else:
+                    lo, hi = signed_jacobian_range(np.array(local, float), np.array(bent, float))
+                    self.assertGreater(lo, 0.0)
+                    self.assertAlmostEqual(problem.min_jacobian_ratio, lo / hi)
+                    self.assertLess(problem.min_jacobian_ratio, 1.0)
+
     def test_valid_state_recovery_remesh_checks_cap_continuity(self) -> None:
         before = {"t": 1e-8, "R_min": 1e-6, "volume": 4.18879, "tip_radius": 1e-18}
         after = {**before, "volume": before["volume"] * (1 + 2e-7)}
