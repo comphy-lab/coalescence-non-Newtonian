@@ -131,6 +131,75 @@ def shallow_interface_refinement_points(
     return sorted(targets, key=lambda point: point[2])[:4]
 
 
+def _q2_crest_radius(v0, m, v1, xi: float) -> float:
+    """Radius of curvature of the quadratic Q2 edge (v0, m, v1) at xi in [-1, 1]; inf if straight.
+
+    Evaluated from the exact parametric derivatives in coordinates relative to v0, so it is
+    independent of the absolute scale and offset of the nodes.
+    """
+    mx, mz = m[0] - v0[0], m[1] - v0[1]
+    ex, ez = v1[0] - v0[0], v1[1] - v0[1]
+    dx, dz = -2.0 * xi * mx + (xi + 0.5) * ex, -2.0 * xi * mz + (xi + 0.5) * ez   # P'(xi)
+    ddx, ddz = ex - 2.0 * mx, ez - 2.0 * mz                                       # P''
+    cross = abs(dx * ddz - dz * ddx)
+    speed = math.hypot(dx, dz)
+    if not (cross > 0.0 and speed > 0.0 and math.isfinite(cross)):
+        return math.inf
+    return speed ** 3 / cross
+
+
+def crest_interface_refinement_points(
+    poly: list[tuple[float, float]], r_neck: float, window: float, max_targets: int = 4
+) -> list[tuple[float, float, float]]:
+    """Convex crests (local maxima of z) of the upper interface within window*r_neck of the neck.
+
+    At low Oh a capillary rim crest forms a few tip radii from the neck with a radius of
+    curvature far below its distance from the tip, so distance-graded elements under-resolve it.
+    The crests are located on the exact Q2 geometry that the remesh reproduces: interior maxima
+    of z on each quadratic edge, and maxima at shared vertices.  Returns (x, z, radius of
+    curvature) per crest, sharpest first.  poly runs from the neck tip (poly[0]) outwards.
+    """
+    if len(poly) < 5 or not (math.isfinite(r_neck) and r_neck > 0.0) or window <= 0.0:
+        return []
+    x_tip = poly[0][0]
+    edges = [(poly[i], poly[i + 1], poly[i + 2]) for i in range(0, len(poly) - 2, 2)]
+
+    def slope(edge, xi):                            # dz/dxi on the edge
+        v0, m, v1 = edge
+        return xi * (v0[1] - 2.0 * m[1] + v1[1]) + 0.5 * (v1[1] - v0[1])
+
+    targets = []
+    for k, edge in enumerate(edges):
+        v0, m, v1 = edge
+        if v0[0] - x_tip > window * r_neck:
+            break
+        curvature_z = v0[1] - 2.0 * m[1] + v1[1]     # d2z/dxi2
+        if curvature_z < 0.0:                        # interior maximum of the quadratic z(xi)
+            xi = -0.5 * (v1[1] - v0[1]) / curvature_z
+            if -1.0 < xi < 1.0:
+                w0, wm, w1 = 0.5 * xi * (xi - 1.0), 1.0 - xi * xi, 0.5 * xi * (xi + 1.0)
+                x = w0 * v0[0] + wm * m[0] + w1 * v1[0]
+                z = w0 * v0[1] + wm * m[1] + w1 * v1[1]
+                radius = _q2_crest_radius(v0, m, v1, xi)
+                if z > 0.0 and x - x_tip <= window * r_neck and math.isfinite(radius):
+                    targets.append((x, z, radius))
+        if k + 1 < len(edges) and v1[1] > 0.0 and v1[0] - x_tip <= window * r_neck:
+            # A strict maximum at the shared vertex, judged on each side separately: the incoming
+            # edge rises into it (positive slope, or zero slope with the edge concave down) and the
+            # outgoing edge falls out of it (negative slope, or zero slope with the edge concave
+            # down).  A stationary side that is not concave is a monotonic join, not a crest.
+            # Interior maxima exclude xi = +-1, so this is the only place a vertex maximum is recorded.
+            incoming, outgoing = slope(edge, 1.0), slope(edges[k + 1], -1.0)
+            nxt = edges[k + 1]
+            rises_in = incoming > 0.0 or (incoming == 0.0 and curvature_z < 0.0)
+            falls_out = outgoing < 0.0 or (outgoing == 0.0 and nxt[0][1] - 2.0 * nxt[1][1] + nxt[2][1] < 0.0)
+            if rises_in and falls_out:
+                radius = min(_q2_crest_radius(v0, m, v1, 1.0), _q2_crest_radius(*edges[k + 1], -1.0))
+                if math.isfinite(radius):
+                    targets.append((v1[0], v1[1], radius))
+    return sorted(targets, key=lambda target: target[2])[:max_targets]
+
+
 def smooth_polyline_arclength(pts: list[tuple[float, float]], half_window: int = 3) -> list[tuple[float, float]]:
     """Local least-squares quadratic smoothing of (r,z)(s) in chord-length parameter.
 
@@ -549,6 +618,22 @@ class MappedTipMesh(GmshTemplate):
         s = self._ginv(dp) / dp
         return self._T + dx * s, dy * s
 
+    def _crest_cap(self, x: float, z: float, radius: float, S: float, fraction: float, floor: float):
+        """Mapped size cap and reach for a crest of the given radius at physical frame point (x, z).
+
+        The physical target fraction*radius is converted with the smallest singular value of the
+        map Jacobian at the crest, so no mapped chord of the cap exceeds the target physically.
+        """
+        centre = self._fwd(x / S, z / S)
+        delta = 1e-3 * radius
+        along_x = self._fwd((x + delta) / S, z / S)
+        along_z = self._fwd(x / S, (z + delta) / S)
+        jacobian = numpy.array([[along_x[0] - centre[0], along_z[0] - centre[0]],
+                                [along_x[1] - centre[1], along_z[1] - centre[1]]]) / (delta / S)
+        stretch = float(numpy.linalg.svd(jacobian, compute_uv=False).min())
+        cap_p = max(fraction * radius / S * stretch, floor)
+        return centre, cap_p, max(radius / S * stretch, cap_p)
+
     def _size_mapped(self, dp: float, h_tip_p: float, k: float) -> float:
         return max(h_tip_p, k * dp)
 
@@ -676,6 +761,7 @@ class MappedTipMesh(GmshTemplate):
         h_tip_phys = pb.current_h_tip()
 
         shift = pb.frame_shift_phys                 # X = r - shift (0 in the laboratory frame)
+        crest_targets = []
         if self.is_first_time() and pb.restart_poly is None:
             shallow_targets = []
             r_neck = (pb.R0 - shift) / S
@@ -712,6 +798,9 @@ class MappedTipMesh(GmshTemplate):
             poly = [tuple(p) for p in pb.restart_poly] if restarting else pb.interface_polyline()
             validate_upper_interface(poly, pb.R0)
             shallow_targets = shallow_interface_refinement_points(poly, pb.tip_radius_lagged)
+            if pb.crest_refine_fraction > 0.0:
+                crest_targets = crest_interface_refinement_points(
+                    poly, poly[0][0] + shift, pb.crest_window)
             r_neck = poly[0][0] / S
             z_pole = poly[-1][1]
             poly[-1] = (-shift, z_pole)             # pole on the axis r = 0
@@ -806,6 +895,14 @@ class MappedTipMesh(GmshTemplate):
         def zone_size(dp):
             return kz * dp + (k - kz) * (max(0.0, d1p - dp) + max(0.0, dp - d2p))
 
+        # Crest refinement: cap the element size near each convex crest at crest_refine_fraction
+        # of its radius of curvature.  The physical cap is mapped with the smallest singular value
+        # of the map Jacobian (so it holds in every direction) and relaxes linearly, doubling one
+        # crest radius away.  Applied both to the interface control points (so the crest geometry
+        # is sampled finely) and to the Gmsh background field.
+        crest_caps = [(*self._crest_cap(x, z, radius, S, pb.crest_refine_fraction, h_floor_p), radius)
+                      for x, z, radius in crest_targets]
+
         def size_mapped(p, on_interface=False):
             dp = max(math.hypot(p[0] - T, p[1]), 1e-3 * h_tip_p)   # clamp: negative powers
             cap = h_max * (dp / L) ** expo
@@ -816,7 +913,10 @@ class MappedTipMesh(GmshTemplate):
             graded = (ks if on_interface else k) * dp
             if kz:
                 graded = min(graded, zone_size(dp))
-            return min(cap, max(h_tip_p, graded))
+            size = min(cap, max(h_tip_p, graded))
+            for centre, cap_p, reach, _ in crest_caps:
+                size = min(size, cap_p * (1.0 + math.hypot(p[0] - centre[0], p[1] - centre[1]) / reach))
+            return size
 
         f_ctrl = pb.tip_map_control_fraction
         t_geo = time.time()
@@ -896,6 +996,12 @@ class MappedTipMesh(GmshTemplate):
             size_expr = f"min({size_expr}, {local_cap!r}*(1+{distance}/{base_size!r}))"
             refinement_receipt.append({"centre_mapped": centre, "size_cap_mapped": local_cap,
                                        "clearance_ratio": clearance_ratio})
+        crest_receipt = []
+        for centre, cap_p, reach, radius in crest_caps:
+            distance = f"sqrt((x-{centre[0]!r})^2+(y-{centre[1]!r})^2)"
+            size_expr = f"min({size_expr}, {cap_p!r}*(1+{distance}/{reach!r}))"
+            crest_receipt.append({"centre_mapped": centre, "size_cap_mapped": cap_p,
+                                  "crest_radius": radius, "reach_mapped": reach})
         field = self.add_mesh_size_field("MathEval", F=size_expr)
         self.set_mesh_size_background_field(field)
         print(f"MESH GEOMETRY: {kind}, {len(iface_p)} interface + {len(axis_p)} axis control points, "
@@ -912,6 +1018,7 @@ class MappedTipMesh(GmshTemplate):
             "n_axis_points": len(axis_p),
             "apex_arc": dict(getattr(pb, "_apex_arc", {})),
             "shallow_interface_refinement": refinement_receipt,
+            "crest_refinement": crest_receipt,
             "interface_grading": ks,
             "zone_grading": [kz, pb.zone_inner, pb.zone_outer] if kz else None,
         }
@@ -983,6 +1090,8 @@ class StokesTipCoalescence(Problem):
         field_frames: bool = False,
         recover_signed_jacobian: bool = False,
         quality_remesh_ratio: float = 0.0,
+        crest_refine_fraction: float = 0.0,
+        crest_window: float = 0.25,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1123,6 +1232,15 @@ class StokesTipCoalescence(Problem):
             raise ValueError("quality_remesh_ratio must lie in [0, 1)")
         self.min_jacobian_ratio = float("nan")
         self._jacobian_ratio_at_remesh = float("nan")
+        # Crest refinement at remeshing (MappedTipMesh): elements within reach of a convex
+        # interface crest lying within crest_window neck radii of the neck are capped at
+        # crest_refine_fraction of the crest's radius of curvature.  0 = off (default).
+        self.crest_refine_fraction = float(crest_refine_fraction)
+        self.crest_window = float(crest_window)
+        if not (math.isfinite(self.crest_refine_fraction) and 0.0 <= self.crest_refine_fraction < 1.0):
+            raise ValueError("crest_refine_fraction must lie in [0, 1)")
+        if not (math.isfinite(self.crest_window) and self.crest_window > 0.0):
+            raise ValueError("crest_window must be positive")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -2335,6 +2453,7 @@ class StokesTipCoalescence(Problem):
                 "tip_shrink_remesh": self.tip_shrink_remesh, "tip_grow_remesh": self.tip_grow_remesh,
                 "recover_signed_jacobian": self.recover_signed_jacobian,
                 "quality_remesh_ratio": self.quality_remesh_ratio,
+                "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,

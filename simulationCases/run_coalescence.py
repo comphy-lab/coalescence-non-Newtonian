@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--zone-outer", type=float, default=2.0)
     ap.add_argument("--recover-signed-jacobian", action="store_true", help="moving frame: a step rejected for a folded Q2 element restores the valid pre-step state and remeshes it")
     ap.add_argument("--quality-remesh-ratio", type=float, default=0.0, help="moving frame: remesh once the worst element's min/max signed-Jacobian ratio falls below this value (0 = off)")
+    ap.add_argument("--crest-refine-fraction", type=float, default=0.0, help="moving frame, at remeshing: cap elements near a convex interface crest at this fraction of its radius of curvature (0 = off)")
+    ap.add_argument("--crest-window", type=float, default=0.25, help="crest refinement: search window behind the neck, in neck radii")
     ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
     return ap
 
@@ -159,6 +161,8 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         field_frames=args.field_frames,
         recover_signed_jacobian=args.recover_signed_jacobian,
         quality_remesh_ratio=args.quality_remesh_ratio,
+        crest_refine_fraction=args.crest_refine_fraction,
+        crest_window=args.crest_window,
     )
 
 

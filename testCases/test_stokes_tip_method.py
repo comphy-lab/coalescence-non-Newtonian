@@ -13,7 +13,8 @@ from scipy.sparse import csr_matrix
 
 from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
-    StokesTipCoalescence, shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
+    StokesTipCoalescence, crest_interface_refinement_points, shallow_interface_refinement_points, tip_fit_indices,
+    validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
@@ -524,6 +525,89 @@ class NewtonGateTests(unittest.TestCase):
             validate_upper_interface(poly, 1e-6)
         self.assertEqual(caught.exception.segment, 0)
         self.assertLess(caught.exception.minimum_z, 0.0)
+
+    @staticmethod
+    def _parabola_crest(r_neck=1.0, radius=2e-3, x0=1.00605, height=1.2e-2, n=121, h=1e-4, scale=1.0, offset=0.0):
+        # z = H - (x - x0)^2 / (2R) sampled at Q2 nodes: exactly quadratic per edge, curvature 1/R at
+        # its apex (x0 inside an edge); z > 0 along the whole profile.
+        xs = [r_neck + i * h for i in range(n)]
+        return [(offset + scale * x, scale * (height - (x - x0) ** 2 / (2 * radius))) for x in xs]
+
+    def test_crest_refinement_finds_a_sharp_convex_crest_near_the_neck(self) -> None:
+        r_neck, radius, x0 = 1.0, 2e-3, 1.00605
+        targets = crest_interface_refinement_points(self._parabola_crest(), r_neck, window=0.25)
+        self.assertEqual(len(targets), 1)
+        x, z, fitted = targets[0]
+        self.assertAlmostEqual(x, x0, delta=1e-9)
+        self.assertAlmostEqual(fitted / radius, 1.0, delta=1e-6)       # exact Q2 curvature at the apex
+        self.assertEqual(crest_interface_refinement_points(self._parabola_crest(), r_neck, window=0.001), [])
+        rising = [(r_neck + i * 1e-4, i * 1e-5) for i in range(41)]  # collinear: no crest
+        self.assertEqual(crest_interface_refinement_points(rising, r_neck, window=0.25), [])
+        self.assertEqual(crest_interface_refinement_points(self._parabola_crest()[:3], r_neck, window=0.25), [])
+
+    def test_crest_refinement_is_scale_invariant(self) -> None:
+        reference = crest_interface_refinement_points(self._parabola_crest(), 1.0, window=0.25)
+        s, offset = 1e-6, 1e-4                       # microscopic crest on an offset frame
+        scaled = crest_interface_refinement_points(self._parabola_crest(scale=s, offset=offset), s, window=0.25)
+        self.assertEqual(len(scaled), 1)
+        self.assertAlmostEqual(scaled[0][2] / (s * reference[0][2]), 1.0, delta=1e-6)
+        self.assertAlmostEqual((scaled[0][0] - offset) / (s * reference[0][0]), 1.0, delta=1e-9)
+
+    def test_crest_refinement_finds_a_crest_inside_a_q2_edge(self) -> None:
+        # Vertex heights rise monotonically, but the edge over nodes 2-4 has an interior maximum.
+        z = [0, 0.5, 1, 4, 2, 2.5, 3]
+        poly = [(0.001 * i, 0.001 * zi) for i, zi in enumerate(z)]
+        targets = crest_interface_refinement_points(poly, 1.0, window=0.25)
+        self.assertEqual(len(targets), 1)
+        x, height, radius = targets[0]
+        self.assertAlmostEqual(x, 0.0031, delta=1e-12)              # xi = 0.1 on the edge 0.002-0.004
+        self.assertAlmostEqual(height, 0.004025, delta=1e-12)
+        self.assertTrue(math.isfinite(radius) and radius > 0.0)
+
+    def test_crest_refinement_finds_a_smooth_maximum_at_a_shared_vertex(self) -> None:
+        # Both one-sided slopes vanish at the vertex (index 2): a smooth vertex-centred maximum.
+        poly = [(i / 1024, z / 1024) for i, z in enumerate([0, 3, 4, 3.5, 2, 3, 6])]
+        targets = crest_interface_refinement_points(poly, 1.0, window=0.25)
+        self.assertEqual(len(targets), 1)
+        x, height, radius = targets[0]
+        self.assertEqual((x, height), poly[2])
+        self.assertAlmostEqual(radius, 0.00048828125, delta=1e-15)  # the sharper one-sided radius
+        flat = [(i / 1024, 1.0) for i in range(7)]                  # flat: no maximum
+        self.assertEqual(crest_interface_refinement_points(flat, 1.0, window=0.25), [])
+
+    def test_stationary_monotonic_joins_are_not_crests_and_do_not_displace_one(self) -> None:
+        # Staircase of stationary joins (concave in, convex out, still rising) before the real crest.
+        z = [0, 3, 4, 4.5, 6, 7.5, 8, 8.5, 10, 11.5, 12, 12.5, 14, 15.5, 16, 16.125, 16.5, 16.75, 16.5, 16, 15]
+        poly = [(i / 1024, zi / 1024) for i, zi in enumerate(z)]
+        targets = crest_interface_refinement_points(poly, 1.0, window=0.25)
+        self.assertEqual([(x, h) for x, h, _ in targets], [poly[17]])  # only the true crest (index 17)
+        join = [(i / 1024, zi / 1024) for i, zi in enumerate([0, 3, 4, 4.5, 6, 7.5, 9])]
+        self.assertEqual(crest_interface_refinement_points(join, 1.0, window=0.25), [])
+
+    def test_crest_cap_holds_physically_in_every_direction(self) -> None:
+        mesh = MappedTipMesh()
+        mesh._T, mesh._L, mesh._alpha, mesh._beta = 0.0, 1.0, 0.5, 0.5
+        mesh._linear_core_d, mesh._dc, mesh._dcp, mesh._A = 0.0, float("inf"), float("inf"), 1.0
+        x, z, radius, fraction = 1e-3, 1e-3, 2e-5, 0.1             # oblique crest: anisotropic map
+        centre, cap_p, reach = mesh._crest_cap(x, z, radius, 1.0, fraction, floor=0.0)
+        target = fraction * radius
+        lengths = []
+        for k in range(32):
+            theta = 2 * math.pi * k / 32
+            back = mesh._inv(centre[0] + cap_p * math.cos(theta), centre[1] + cap_p * math.sin(theta))
+            lengths.append(math.hypot(back[0] - x, back[1] - z))
+        self.assertLessEqual(max(lengths), 1.01 * target)           # never coarser than requested
+        self.assertGreaterEqual(max(lengths), 0.95 * target)        # and tight in the weakest direction
+        self.assertGreaterEqual(reach, cap_p)
+
+    def test_crest_refinement_options_are_off_by_default_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out)
+            self.assertEqual(problem.crest_refine_fraction, 0.0)
+            for bad in ({"crest_refine_fraction": -0.1}, {"crest_refine_fraction": 1.0},
+                        {"crest_window": 0.0}, {"crest_window": float("nan")}):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, **bad)
 
     def test_shallow_off_neck_trough_requests_refinement_without_moving_interface(self) -> None:
         poly = [(0.0, 1e-3), (0.5, 1.2e-3), (1.0, 1e-2)]
