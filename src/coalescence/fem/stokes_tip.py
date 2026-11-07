@@ -352,6 +352,15 @@ def gap_half_height(poly, r_out: float) -> float:
     return best
 
 
+def point_distance_expression(cx: float, cy: float) -> str:
+    """Gmsh MathEval distance from (x, y) to a fixed point.
+
+    Each coordinate is parenthesised: a negative literal written as ``x-{cx}`` gives ``x--0.15``,
+    which Gmsh's expression parser refuses.
+    """
+    return f"sqrt((x-({cx!r}))^2+(y-({cy!r}))^2)"
+
+
 def capped_tip_scale(rho: float, gap: float, cap: float) -> float:
     """Tip length scale for meshing and remesh triggers: rho, at most cap gap half-heights.
 
@@ -1071,13 +1080,13 @@ class MappedTipMesh(GmshTemplate):
             centre = self._fwd(x / S, z / S)
             base_size = size_mapped(centre)
             local_cap = 0.5 * base_size
-            distance = f"sqrt((x-{centre[0]!r})^2+(y-{centre[1]!r})^2)"
+            distance = point_distance_expression(centre[0], centre[1])
             size_expr = f"min({size_expr}, {local_cap!r}*(1+{distance}/{base_size!r}))"
             refinement_receipt.append({"centre_mapped": centre, "size_cap_mapped": local_cap,
                                        "clearance_ratio": clearance_ratio})
         crest_receipt = []
         for centre, cap_p, reach, radius in crest_caps:
-            distance = f"sqrt((x-{centre[0]!r})^2+(y-{centre[1]!r})^2)"
+            distance = point_distance_expression(centre[0], centre[1])
             size_expr = f"min({size_expr}, {cap_p!r}*(1+{distance}/{reach!r}))"
             crest_receipt.append({"centre_mapped": centre, "size_cap_mapped": cap_p,
                                   "crest_radius": radius, "reach_mapped": reach})
@@ -2295,8 +2304,10 @@ class StokesTipCoalescence(Problem):
         if abs(after["volume"] - before["volume"]) > 1e-5 * before["volume"]:
             raise RuntimeError("valid-state recovery remesh changed volume excessively")
         # Fitted tip radius: a factor of two at most.  With tip_gap_cap on, a state whose fitted
-        # radius exceeds its capped scale is flat on the mesh scale; its curvature is compared
-        # instead, in units of the capped scale, as half the curvature step of a factor-two change.
+        # radius exceeds its capped scale is flat on the mesh scale: the sign and size of a curvature
+        # far below 1/scale are fit noise on a flat apex.  Its curvature is compared instead in units
+        # of the gap half-height G (the capped scale when G is not recorded): a change of at most
+        # 0.5/G, half the curvature of the gap itself.
         rho_before, rho_after = before["tip_radius"], after["tip_radius"]
         scale_before = before.get("tip_scale", rho_before)
         scale_after = after.get("tip_scale", rho_after)
@@ -2312,7 +2323,10 @@ class StokesTipCoalescence(Problem):
             else:
                 k_before = before.get("kappa_m", 1.0 / rho_before)
                 k_after = after.get("kappa_m", 1.0 / rho_after)
-                if abs(k_after - k_before) * min(scale_before, scale_after) > 0.5:
+                gaps = [g for g in (before.get("gap_half_height"), after.get("gap_half_height"))
+                        if g is not None and math.isfinite(g) and g > 0]
+                unit = min(gaps) if len(gaps) == 2 else min(scale_before, scale_after)
+                if abs(k_after - k_before) * unit > 0.5:
                     raise RuntimeError("valid-state recovery remesh changed tip curvature excessively")
 
     # ------------------------------------------------------------------ drive

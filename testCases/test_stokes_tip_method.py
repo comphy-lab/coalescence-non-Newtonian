@@ -14,7 +14,7 @@ from scipy.sparse import csr_matrix
 from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
     StokesTipCoalescence, capped_tip_scale, crest_interface_refinement_points, fit_circle_kasa, gap_half_height,
-    shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
+    point_distance_expression, shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
@@ -219,6 +219,32 @@ class NewtonGateTests(unittest.TestCase):
             edge[1] = (math.nextafter(edge[1][0], bump * math.inf) if bump else edge[1][0], edge[1][1])
             self.assertAlmostEqual(gap_half_height(edge, 4e-4), 9.2e-4, delta=1e-12)
         self.assertAlmostEqual(gap_half_height(fine, 4e-4), 9.2e-4, delta=1e-12)
+
+    def test_flat_capped_apex_recovery_compares_curvature_on_the_gap_scale(self) -> None:
+        # Recovery remesh of a flat apex at Oh=3e-4, a/sqrt(Oh)=2.89: both fitted radii far beyond 6 gap
+        # half-heights, curvature sign flipped by the fit; geometry unchanged.
+        base = {"t": 3.2744812722860583, "R_min": 0.05006481021292418, "volume": 4.1888}
+        before = dict(base, tip_radius=0.03022655696937398, kappa_m=33.08349015778462,
+                      tip_scale=0.009020116180324654, gap_half_height=0.0015033526967207758)
+        after = dict(base, tip_radius=0.01347727990839988, kappa_m=-74.19894866001394,
+                     tip_scale=0.009020096777068418, gap_half_height=0.0015033494628447365)
+        StokesTipCoalescence.verify_recovery_remesh(before, after)
+        # A radius that drops below the cap moves the mesh scale with it: refused on the scale.
+        with self.assertRaisesRegex(RuntimeError, "tip scale"):
+            StokesTipCoalescence.verify_recovery_remesh(before, dict(after, tip_radius=1.2e-3, kappa_m=-1 / 1.2e-3,
+                                                                     tip_scale=1.2e-3))
+        # Consistent cap = 1 states: radii 2G, scales G, opposite curvature signs: |dkappa| G = 1 > 0.5, refused.
+        gap = 1e-3
+        flat = dict(base, tip_radius=2 * gap, tip_scale=gap, gap_half_height=gap)
+        with self.assertRaisesRegex(RuntimeError, "curvature"):
+            StokesTipCoalescence.verify_recovery_remesh(dict(flat, kappa_m=1 / (2 * gap)), dict(flat, kappa_m=-1 / (2 * gap)))
+
+    def test_size_field_distance_parses_negative_centres(self) -> None:
+        # A crest cap behind the neck in the moving frame: the 18P remesh failed on "x--0.15".
+        expr = point_distance_expression(-0.15034367107065086, 122.04557883366792)
+        self.assertNotIn("--", expr)
+        value = eval(expr.replace("^", "**"), {"sqrt": math.sqrt, "x": 1.0, "y": 120.0})   # noqa: S307 (test literal)
+        self.assertAlmostEqual(value, math.hypot(1.15034367107065086, 2.04557883366792), places=12)
 
     def test_capped_recovery_still_checks_the_fitted_curvature(self) -> None:
         base = {"t": 1.0, "R_min": 1e-2, "volume": 4.0}
