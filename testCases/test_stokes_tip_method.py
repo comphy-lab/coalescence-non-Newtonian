@@ -221,8 +221,8 @@ class NewtonGateTests(unittest.TestCase):
         self.assertAlmostEqual(gap_half_height(fine, 4e-4), 9.2e-4, delta=1e-12)
 
     def test_flat_capped_apex_recovery_compares_curvature_on_the_gap_scale(self) -> None:
-        # Recovery remesh of a flat apex at Oh=3e-4, a/sqrt(Oh)=2.89: both fitted radii far beyond 6 gap
-        # half-heights, curvature sign flipped by the fit; geometry unchanged.
+        # Recovery remesh of a flat capped apex: both fitted radii far beyond the cap, the sign of the
+        # fitted curvature flipped between meshes, geometry unchanged.
         base = {"t": 3.2744812722860583, "R_min": 0.05006481021292418, "volume": 4.1888}
         before = dict(base, tip_radius=0.03022655696937398, kappa_m=33.08349015778462,
                       tip_scale=0.009020116180324654, gap_half_height=0.0015033526967207758)
@@ -240,7 +240,7 @@ class NewtonGateTests(unittest.TestCase):
             StokesTipCoalescence.verify_recovery_remesh(dict(flat, kappa_m=1 / (2 * gap)), dict(flat, kappa_m=-1 / (2 * gap)))
 
     def test_size_field_distance_parses_negative_centres(self) -> None:
-        # A crest cap behind the neck in the moving frame: the 18P remesh failed on "x--0.15".
+        # A refinement centre at negative mapped x must still give a valid Gmsh distance expression.
         expr = point_distance_expression(-0.15034367107065086, 122.04557883366792)
         self.assertNotIn("--", expr)
         value = eval(expr.replace("^", "**"), {"sqrt": math.sqrt, "x": 1.0, "y": 120.0})   # noqa: S307 (test literal)
