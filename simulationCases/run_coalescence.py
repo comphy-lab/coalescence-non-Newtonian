@@ -101,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--quality-remesh-ratio", type=float, default=0.0, help="moving frame: remesh once the worst element's min/max signed-Jacobian ratio falls below this value (0 = off)")
     ap.add_argument("--crest-refine-fraction", type=float, default=0.0, help="moving frame, at remeshing: cap elements near a convex interface crest at this fraction of its radius of curvature (0 = off)")
     ap.add_argument("--crest-window", type=float, default=0.25, help="crest refinement: search window behind the neck, in neck radii")
+    ap.add_argument("--tip-fit-support", type=float, default=0.0, help="tip fit: always keep the interface nodes up to this many lagged tip radii above the neck (0 = chord-angle lobe only)")
+    ap.add_argument("--tip-gap-cap", type=float, default=0.0, help="cap the tip scale that sizes the mesh and triggers tip-radius remeshes at this many gap half-heights (0 = off)")
     ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
     return ap
 
@@ -163,6 +165,8 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         quality_remesh_ratio=args.quality_remesh_ratio,
         crest_refine_fraction=args.crest_refine_fraction,
         crest_window=args.crest_window,
+        tip_fit_support=args.tip_fit_support,
+        tip_gap_cap=args.tip_gap_cap,
     )
 
 

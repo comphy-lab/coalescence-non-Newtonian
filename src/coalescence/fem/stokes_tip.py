@@ -260,8 +260,13 @@ def fit_circle_kasa(points) -> tuple[tuple[float, float], float] | None:
     return (float(cx * scale + x0[0]), float(cy * scale + x0[1])), float(math.sqrt(r2) * scale)
 
 
-def tip_fit_indices(r, z, i0: int, angle_limit: float, z_apex: float) -> list[int]:
-    """Select the first local chord-angle lobe, excluding unresolved apex nodes."""
+def tip_fit_indices(r, z, i0: int, angle_limit: float, z_apex: float, z_support: float = 0.0) -> list[int]:
+    """Select the first local chord-angle lobe, excluding unresolved apex nodes.
+
+    Every node between z_apex and z_support above the neck is always kept, so the window
+    cannot collapse onto a flat apex face whose node noise turns the chord angle back.
+    z_support = 0 (default) is the plain chord-angle lobe.
+    """
     distance2 = (r - r[i0]) ** 2 + (z - z[i0]) ** 2
     order = sorted(range(len(r)), key=lambda i: distance2[i])
     near = [i0]
@@ -269,6 +274,10 @@ def tip_fit_indices(r, z, i0: int, angle_limit: float, z_apex: float) -> list[in
     for i in order:
         height = z[i] - z[i0]
         if i == i0 or height <= 0:
+            continue
+        if height <= z_support:
+            if height >= z_apex:
+                near.append(i)
             continue
         angle = math.atan2(abs(r[i] - r[i0]), height)
         if angle > angle_limit:
@@ -282,6 +291,76 @@ def tip_fit_indices(r, z, i0: int, angle_limit: float, z_apex: float) -> list[in
         near.append(i)
         last_angle = angle
     return near if len(near) >= 7 else order[:min(7, len(r))]
+
+
+def gap_half_height(poly, r_out: float) -> float:
+    """Half-height of the gas gap outside the neck: the lowest point of the interface at r >= r_out.
+
+    ``poly`` is the ordered Q2 interface (vertex, midside, vertex, ...).  Each edge is taken as
+    its quadratic interpolant, so a minimum inside an edge, or where an edge crosses r_out,
+    is found exactly and the value does not change when an edge is subdivided.  A trailing
+    two-point segment is linear.  Infinite when no part of the interface reaches r_out.
+    """
+    best = float("inf")
+    n = len(poly)
+
+    def consider(r, z):
+        nonlocal best
+        if r >= r_out and z < best:
+            best = z
+
+    i = 0
+    while i + 1 < n:
+        if i + 2 < n:
+            (r0, z0), (rm, zm), (r1, z1) = poly[i], poly[i + 1], poly[i + 2]
+            # Quadratic in t in [0, 1] through t = 0, 1/2, 1: f(t) = f0 + b t + a t^2.
+            def coeffs(f0, fm, f1):
+                return f0, -3.0 * f0 + 4.0 * fm - f1, 2.0 * f0 - 4.0 * fm + 2.0 * f1
+            cr, cz = coeffs(r0, rm, r1), coeffs(z0, zm, z1)
+            def at(c, t):
+                return c[0] + c[1] * t + c[2] * t * t
+            consider(r0, z0)
+            consider(r1, z1)
+            if cz[2] != 0.0:                                  # stationary point of z
+                t = -cz[1] / (2.0 * cz[2])
+                if 0.0 < t < 1.0:
+                    consider(at(cr, t), at(cz, t))
+            # Crossings of r = r_out, by the cancellation-free form of the quadratic roots: a nearly
+            # linear radial edge has a tiny a, where (-b + sqrt(disc)) / 2a loses every digit.
+            a, b, c = cr[2], cr[1], cr[0] - r_out
+            roots = []
+            disc = b * b - 4.0 * a * c
+            if disc >= 0.0:
+                q = -0.5 * (b + math.copysign(math.sqrt(disc), b))
+                if a != 0.0:
+                    roots.append(q / a)
+                if q != 0.0:
+                    roots.append(c / q)
+            for t in roots:
+                if 0.0 < t < 1.0:
+                    consider(r_out, at(cz, t))
+            i += 2
+        else:
+            (r0, z0), (r1, z1) = poly[i], poly[i + 1]
+            consider(r0, z0)
+            consider(r1, z1)
+            if r1 != r0:
+                t = (r_out - r0) / (r1 - r0)
+                if 0.0 < t < 1.0:
+                    consider(r_out, z0 + t * (z1 - z0))
+            i += 1
+    return best
+
+
+def capped_tip_scale(rho: float, gap: float, cap: float) -> float:
+    """Tip length scale for meshing and remesh triggers: rho, at most cap gap half-heights.
+
+    cap = 0 is off.  Past the inertial bulb transition the plane-node circle fit of a
+    blunt apex can read radii far beyond the gap that bounds the meniscus.
+    """
+    if cap > 0.0 and math.isfinite(gap) and gap > 0.0:
+        return min(rho, cap * gap)
+    return rho
 
 
 def circle_through(p0, p1, p2) -> tuple[tuple[float, float], float] | None:
@@ -1092,6 +1171,8 @@ class StokesTipCoalescence(Problem):
         quality_remesh_ratio: float = 0.0,
         crest_refine_fraction: float = 0.0,
         crest_window: float = 0.25,
+        tip_fit_support: float = 0.0,
+        tip_gap_cap: float = 0.0,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1241,6 +1322,16 @@ class StokesTipCoalescence(Problem):
             raise ValueError("crest_refine_fraction must lie in [0, 1)")
         if not (math.isfinite(self.crest_window) and self.crest_window > 0.0):
             raise ValueError("crest_window must be positive")
+        # Blunt-apex tip treatment.  tip_fit_support: the tip fit always keeps the interface
+        # nodes up to this many lagged tip radii above the neck (0 = the chord-angle lobe only).
+        # tip_gap_cap: the tip scale that sizes the mesh and drives the tip-radius remesh
+        # triggers is capped at this many gap half-heights (0 = off).  Both off by default.
+        self.tip_fit_support = float(tip_fit_support)
+        self.tip_gap_cap = float(tip_gap_cap)
+        if not (math.isfinite(self.tip_fit_support) and 0.0 <= self.tip_fit_support < 1.0):
+            raise ValueError("tip_fit_support must lie in [0, 1)")
+        if not (math.isfinite(self.tip_gap_cap) and self.tip_gap_cap >= 0.0):
+            raise ValueError("tip_gap_cap must be non-negative")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -1666,12 +1757,13 @@ class StokesTipCoalescence(Problem):
         # Nodes within tip_apex_zone lagged radii of the apex carry position noise larger
         # than their sagitta (at R0=1e-6, ~1e-18 solver units against ~1e-23) and are
         # excluded from the fit.
-        z_apex = self.tip_apex_zone * self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
+        lagged = self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
+        z_apex = self.tip_apex_zone * lagged
         support = self._step_tip_fit_support
         if support is not None and support[:2] == (self.n_remesh, n):
             near = support[2]
         else:
-            near = tip_fit_indices(r, z, i0, self.tip_fit_angle, z_apex)
+            near = tip_fit_indices(r, z, i0, self.tip_fit_angle, z_apex, self.tip_fit_support * lagged)
         p1 = (float(r[order[1]]), float(z[order[1]]))
         circ = fit_circle_kasa([(float(r[i]), float(z[i])) for i in near])
         if circ is None:
@@ -1682,6 +1774,12 @@ class StokesTipCoalescence(Problem):
             tip_radius = rho
             kappa_m = -1.0 / rho if cx > p0[0] else 1.0 / rho
         two_h = kappa_m + 1.0 / rmin
+        extra = {}
+        tip_scale = tip_radius
+        if self.tip_gap_cap > 0.0:
+            gap = gap_half_height(self.interface_polyline(), 1.05 * rmin - self._frame_shift_now())
+            tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap)
+            extra["gap_half_height"] = gap
         if support is None or support[:2] != (self.n_remesh, n):
             self._last_tip_fit_support = (self.n_remesh, n, tuple(near))
             self._last_tip_fit_curvature = two_h
@@ -1694,8 +1792,10 @@ class StokesTipCoalescence(Problem):
             "kappa_m": kappa_m,
             "two_H": two_h,
             "tip_radius": tip_radius,
+            "tip_scale": tip_scale,
             "h_tip_now": h_tip_now,
             "volume": vol,
+            **extra,
         }
 
     def bridge_half_height(self, rmin: float, poly: list[tuple[float, float]]) -> float:
@@ -1764,7 +1864,7 @@ class StokesTipCoalescence(Problem):
 
     def write_snapshot(self, state: dict[str, float]) -> None:
         """Save the current interface in the restart format, sized as a remesh at this instant would be."""
-        rho = state["tip_radius"]
+        rho = state.get("tip_scale", state["tip_radius"])
         if self.tip_unresolved(rho) or not (math.isfinite(rho) and rho > 0):
             rho = self.rho_resolvable()
         folder = self.output_root / "snapshots"
@@ -2087,7 +2187,7 @@ class StokesTipCoalescence(Problem):
     def _remesh_reason(self) -> str | None:
         st = self.neck_state()
         self.last_rmin = st["R_min"]
-        rho = st["tip_radius"]
+        rho = st.get("tip_scale", st["tip_radius"])
         quality = self._quality_remesh_reason()
         if quality is not None:
             return quality
@@ -2106,7 +2206,7 @@ class StokesTipCoalescence(Problem):
 
     def actions_before_remeshing(self, active_remeshers):
         st = self.neck_state()
-        rho = st["tip_radius"]
+        rho = st.get("tip_scale", st["tip_radius"])
         if self.tip_unresolved(rho):
             # Build the next mesh at the floor; the measured radius is noise there.
             rho = self.rho_resolvable()
@@ -2194,11 +2294,26 @@ class StokesTipCoalescence(Problem):
             raise RuntimeError("valid-state recovery remesh changed neck radius")
         if abs(after["volume"] - before["volume"]) > 1e-5 * before["volume"]:
             raise RuntimeError("valid-state recovery remesh changed volume excessively")
-        if (math.isfinite(before["tip_radius"]) and math.isfinite(after["tip_radius"])
-                and before["tip_radius"] > 0 and after["tip_radius"] > 0):
-            ratio = after["tip_radius"] / before["tip_radius"]
-            if not 0.5 <= ratio <= 2.0:
-                raise RuntimeError("valid-state recovery remesh changed tip radius excessively")
+        # Fitted tip radius: a factor of two at most.  With tip_gap_cap on, a state whose fitted
+        # radius exceeds its capped scale is flat on the mesh scale; its curvature is compared
+        # instead, in units of the capped scale, as half the curvature step of a factor-two change.
+        rho_before, rho_after = before["tip_radius"], after["tip_radius"]
+        scale_before = before.get("tip_scale", rho_before)
+        scale_after = after.get("tip_scale", rho_after)
+        valid = all(math.isfinite(v) and v > 0 for v in (rho_before, rho_after, scale_before, scale_after))
+        capped = scale_before != rho_before or scale_after != rho_after
+        if valid:
+            if capped and not 0.5 <= scale_after / scale_before <= 2.0:
+                raise RuntimeError("valid-state recovery remesh changed tip scale excessively")
+            if rho_before <= scale_before and rho_after <= scale_after:
+                ratio = rho_after / rho_before
+                if not 0.5 <= ratio <= 2.0:
+                    raise RuntimeError("valid-state recovery remesh changed tip radius excessively")
+            else:
+                k_before = before.get("kappa_m", 1.0 / rho_before)
+                k_after = after.get("kappa_m", 1.0 / rho_after)
+                if abs(k_after - k_before) * min(scale_before, scale_after) > 0.5:
+                    raise RuntimeError("valid-state recovery remesh changed tip curvature excessively")
 
     # ------------------------------------------------------------------ drive
     @staticmethod
@@ -2410,8 +2525,9 @@ class StokesTipCoalescence(Problem):
                           f"u*dt={expected:.6e}, ratio={ratio:.6e}", flush=True)
                     status = "kinematic_failure"
                     break
-            if self.tip_refine and math.isfinite(st["tip_radius"]) and st["tip_radius"] > 0 and st["h_tip_now"] <= st["tip_radius"] / 4:
-                self.tip_radius_lagged = st["tip_radius"]  # trust the measurement only when resolved
+            scale = st.get("tip_scale", st["tip_radius"])
+            if self.tip_refine and math.isfinite(scale) and scale > 0 and st["h_tip_now"] <= scale / 4:
+                self.tip_radius_lagged = scale  # trust the measurement only when resolved
             self._last_curvature_ratio = (
                 self._trial_curvature_ratio if self._trial_curvature_ratio is not None
                 else self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
@@ -2454,6 +2570,7 @@ class StokesTipCoalescence(Problem):
                 "recover_signed_jacobian": self.recover_signed_jacobian,
                 "quality_remesh_ratio": self.quality_remesh_ratio,
                 "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
+                "tip_fit_support": self.tip_fit_support, "tip_gap_cap": self.tip_gap_cap,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,

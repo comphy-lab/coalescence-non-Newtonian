@@ -13,8 +13,8 @@ from scipy.sparse import csr_matrix
 
 from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
-    StokesTipCoalescence, crest_interface_refinement_points, shallow_interface_refinement_points, tip_fit_indices,
-    validate_upper_interface,
+    StokesTipCoalescence, capped_tip_scale, crest_interface_refinement_points, fit_circle_kasa, gap_half_height,
+    shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
@@ -170,6 +170,71 @@ class NewtonGateTests(unittest.TestCase):
             support = tip_fit_indices(changed, z, 0, 0.15, 0.05)
             self.assertGreaterEqual(len(support), 7)
             self.assertLessEqual(max(support), 10)
+
+    def test_tip_fit_support_keeps_the_meniscus_behind_a_noisy_flat_face(self) -> None:
+        import numpy as np
+        rho, h = 1.0, 0.002                       # concave meniscus resolved by 500 nodes per radius
+        z = np.arange(0.0, 0.6, h)
+        r = 5.0 + rho - np.sqrt(rho**2 - z**2)
+        r[2] += 1e-5                               # node noise turns the chord angle back
+        lobe = tip_fit_indices(r, z, 0, 0.15, 0.0)
+        self.assertEqual(lobe, tip_fit_indices(r, z, 0, 0.15, 0.0, 0.0))     # default is the plain lobe
+        self.assertLess(max(z[lobe]), 0.02 * rho)  # collapsed onto the first few nodes
+        kept = tip_fit_indices(r, z, 0, 0.15, 0.0, 0.25 * rho)
+        self.assertGreater(max(z[kept]), 0.24 * rho)
+        (_, _), radius = fit_circle_kasa([(float(r[i]), float(z[i])) for i in kept])
+        self.assertAlmostEqual(radius, rho, delta=0.01 * rho)
+        apex = tip_fit_indices(r, z, 0, 0.15, 0.05 * rho, 0.25 * rho)
+        self.assertGreaterEqual(min(z[i] for i in apex if i != 0), 0.05 * rho)  # apex zone still excluded
+
+    def test_gap_scale_caps_only_a_tip_radius_beyond_it(self) -> None:
+        # Ordered Q2 interface (vertex, midside, vertex, ...): a bulb, then the gap surface beyond it.
+        poly = [(0.0, 0.0), (0.01, 0.10), (0.03, 0.30), (0.06, 0.40), (0.04, 0.20), (0.06, 0.25), (0.08, 0.50)]
+        self.assertAlmostEqual(gap_half_height(poly, 0.035), 0.19375)   # minimum inside the last edge (t = 1/8)
+        self.assertEqual(gap_half_height(poly, 1.0), math.inf)
+        self.assertEqual(capped_tip_scale(5.0, 0.2, 0.0), 5.0)      # off
+        self.assertAlmostEqual(capped_tip_scale(5.0, 0.2, 6.0), 1.2)
+        self.assertEqual(capped_tip_scale(1.0, 0.2, 6.0), 1.0)      # below the cap: unchanged
+        self.assertEqual(capped_tip_scale(5.0, math.inf, 6.0), 5.0)
+
+    def test_gap_is_exact_on_q2_edges_and_unchanged_by_subdivision(self) -> None:
+        def curve(t):                              # one quadratic edge whose minimum lies between its nodes
+            return (2.0 + t, (t - 0.75) ** 2 + 1e-4)
+        coarse = [curve(0.0), curve(0.5), curve(1.0)]
+        fine = [curve(k / 4.0) for k in range(5)]  # exact subdivision of the same quadratic
+        for r_out in (1.0, 2.6, 2.8):
+            exact = 1e-4 if r_out <= 2.75 else (r_out - 2.75) ** 2 + 1e-4
+            self.assertAlmostEqual(gap_half_height(coarse, r_out), exact, delta=1e-12)
+            self.assertAlmostEqual(gap_half_height(fine, r_out), exact, delta=1e-12)
+            self.assertAlmostEqual(capped_tip_scale(1.0, gap_half_height(coarse, r_out), 6.0),
+                                   capped_tip_scale(1.0, gap_half_height(fine, r_out), 6.0), delta=1e-12)
+
+    def test_gap_crossing_survives_a_nearly_linear_radial_edge(self) -> None:
+        def curve(t):                              # straight edge rising outwards: the minimum is the r_out crossing
+            return (1e-3 * t, 2e-4 + 1.8e-3 * t)
+        coarse = [curve(0.0), curve(0.5), curve(1.0)]
+        fine = [curve(k / 4.0) for k in range(5)]
+        for bump in (0.0, 1.0, -1.0):              # one-ulp radial midpoint perturbations
+            edge = list(coarse)
+            edge[1] = (math.nextafter(edge[1][0], bump * math.inf) if bump else edge[1][0], edge[1][1])
+            self.assertAlmostEqual(gap_half_height(edge, 4e-4), 9.2e-4, delta=1e-12)
+        self.assertAlmostEqual(gap_half_height(fine, 4e-4), 9.2e-4, delta=1e-12)
+
+    def test_capped_recovery_still_checks_the_fitted_curvature(self) -> None:
+        base = {"t": 1.0, "R_min": 1e-2, "volume": 4.0}
+        before = dict(base, tip_radius=1e-4, kappa_m=-1e4, tip_scale=1e-5)
+        StokesTipCoalescence.verify_recovery_remesh(before, dict(base, tip_radius=1.2e-4, kappa_m=-1 / 1.2e-4,
+                                                                 tip_scale=1e-5))
+        with self.assertRaisesRegex(RuntimeError, "curvature"):     # capped, but turns over on the mesh scale
+            StokesTipCoalescence.verify_recovery_remesh(before, dict(base, tip_radius=2e-5, kappa_m=5e4,
+                                                                     tip_scale=1e-5))
+        with self.assertRaisesRegex(RuntimeError, "tip scale"):
+            StokesTipCoalescence.verify_recovery_remesh(before, dict(base, tip_radius=1e-4, kappa_m=-1e4,
+                                                                     tip_scale=4e-5))
+        uncapped = dict(base, tip_radius=1e-4, kappa_m=-1e4, tip_scale=1e-4)     # cap off: radius ratio as before
+        with self.assertRaisesRegex(RuntimeError, "tip radius"):
+            StokesTipCoalescence.verify_recovery_remesh(uncapped, dict(base, tip_radius=3e-4, kappa_m=-1 / 3e-4,
+                                                                       tip_scale=3e-4))
 
     def test_step_curvature_uses_matched_support_at_an_angle_threshold(self) -> None:
         import numpy as np
@@ -606,6 +671,15 @@ class NewtonGateTests(unittest.TestCase):
             self.assertEqual(problem.crest_refine_fraction, 0.0)
             for bad in ({"crest_refine_fraction": -0.1}, {"crest_refine_fraction": 1.0},
                         {"crest_window": 0.0}, {"crest_window": float("nan")}):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, **bad)
+
+    def test_blunt_apex_options_are_off_by_default_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out)
+            self.assertEqual((problem.tip_fit_support, problem.tip_gap_cap), (0.0, 0.0))
+            for bad in ({"tip_fit_support": -0.1}, {"tip_fit_support": 1.0}, {"tip_fit_support": float("nan")},
+                        {"tip_gap_cap": -1.0}, {"tip_gap_cap": float("inf")}):
                 with self.assertRaises(ValueError):
                     self._moving_problem(out, **bad)
 
