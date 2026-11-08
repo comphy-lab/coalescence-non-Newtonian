@@ -2307,14 +2307,22 @@ class StokesTipCoalescence(Problem):
         # radius exceeds its capped scale is flat on the mesh scale: the sign and size of a curvature
         # far below 1/scale are fit noise on a flat apex.  Its curvature is compared instead in units
         # of the gap half-height G (the capped scale when G is not recorded): a change of at most
-        # 0.5/G, half the curvature of the gap itself.
+        # 0.5/G, half the curvature of the gap itself.  For a capped state the continuity of the
+        # geometry is checked on G itself when both states record it: the scale then follows the
+        # fitted radius below the cap, and a radius that drops below the cap is judged by the same
+        # curvature bound.  Without G the capped scales must agree within a factor of two.
         rho_before, rho_after = before["tip_radius"], after["tip_radius"]
         scale_before = before.get("tip_scale", rho_before)
         scale_after = after.get("tip_scale", rho_after)
         valid = all(math.isfinite(v) and v > 0 for v in (rho_before, rho_after, scale_before, scale_after))
         capped = scale_before != rho_before or scale_after != rho_after
+        gaps = [g for g in (before.get("gap_half_height"), after.get("gap_half_height"))
+                if g is not None and math.isfinite(g) and g > 0]
         if valid:
-            if capped and not 0.5 <= scale_after / scale_before <= 2.0:
+            if capped and len(gaps) == 2:
+                if not 0.5 <= gaps[1] / gaps[0] <= 2.0:
+                    raise RuntimeError("valid-state recovery remesh changed gap half-height excessively")
+            elif capped and not 0.5 <= scale_after / scale_before <= 2.0:
                 raise RuntimeError("valid-state recovery remesh changed tip scale excessively")
             if rho_before <= scale_before and rho_after <= scale_after:
                 ratio = rho_after / rho_before
@@ -2323,8 +2331,6 @@ class StokesTipCoalescence(Problem):
             else:
                 k_before = before.get("kappa_m", 1.0 / rho_before)
                 k_after = after.get("kappa_m", 1.0 / rho_after)
-                gaps = [g for g in (before.get("gap_half_height"), after.get("gap_half_height"))
-                        if g is not None and math.isfinite(g) and g > 0]
                 unit = min(gaps) if len(gaps) == 2 else min(scale_before, scale_after)
                 if abs(k_after - k_before) * unit > 0.5:
                     raise RuntimeError("valid-state recovery remesh changed tip curvature excessively")

@@ -229,10 +229,30 @@ class NewtonGateTests(unittest.TestCase):
         after = dict(base, tip_radius=0.01347727990839988, kappa_m=-74.19894866001394,
                      tip_scale=0.009020096777068418, gap_half_height=0.0015033494628447365)
         StokesTipCoalescence.verify_recovery_remesh(before, after)
-        # A radius that drops below the cap moves the mesh scale with it: refused on the scale.
-        with self.assertRaisesRegex(RuntimeError, "tip scale"):
+        # A radius that drops far below the cap turns the apex over on the gap scale:
+        # |dkappa| G = (1/1.2e-3 + 33) * 1.5e-3 = 1.3 > 0.5, refused on the curvature.
+        with self.assertRaisesRegex(RuntimeError, "curvature"):
             StokesTipCoalescence.verify_recovery_remesh(before, dict(after, tip_radius=1.2e-3, kappa_m=-1 / 1.2e-3,
                                                                      tip_scale=1.2e-3))
+        # A gap that changes by more than a factor of two is a changed geometry: refused on G.
+        with self.assertRaisesRegex(RuntimeError, "gap half-height"):
+            StokesTipCoalescence.verify_recovery_remesh(before, dict(after, gap_half_height=4e-3,
+                                                                     tip_scale=after["tip_radius"]))
+
+    def test_capped_recovery_accepts_a_radius_below_the_cap_within_the_gap_curvature_bound(self) -> None:
+        # Recovery remesh of a capped flat apex whose fitted radius on the new mesh falls below the
+        # cap: the scale changes by 2.5x, the gap is unchanged and |dkappa| G = 0.47 <= 0.5.
+        base = {"t": 3.5468312722860524, "R_min": 0.051948024604720935, "volume": 4.1888}
+        before = dict(base, tip_radius=0.029426388469859777, kappa_m=33.98310333000118,
+                      tip_scale=0.010446792993391383, gap_half_height=0.0017411321655652304)
+        after = dict(base, tip_radius=0.004221368044435637, kappa_m=-236.89002936338187,
+                     tip_scale=0.004221368044435637, gap_half_height=0.0017415814368085558)
+        StokesTipCoalescence.verify_recovery_remesh(before, after)
+        StokesTipCoalescence.verify_recovery_remesh(after, before)
+        # Without recorded gaps the capped scales must still agree within a factor of two.
+        strip = lambda s: {k: v for k, v in s.items() if k != "gap_half_height"}   # noqa: E731
+        with self.assertRaisesRegex(RuntimeError, "tip scale"):
+            StokesTipCoalescence.verify_recovery_remesh(strip(before), strip(after))
         # Consistent cap = 1 states: radii 2G, scales G, opposite curvature signs: |dkappa| G = 1 > 0.5, refused.
         gap = 1e-3
         flat = dict(base, tip_radius=2 * gap, tip_scale=gap, gap_half_height=gap)
