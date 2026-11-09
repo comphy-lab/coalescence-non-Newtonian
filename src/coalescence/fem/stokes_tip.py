@@ -1808,6 +1808,8 @@ class StokesTipCoalescence(Problem):
             floor = self.tip_scale_floor if self.cap_engaged else 0.0
             tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap, floor)
             extra["gap_half_height"] = gap
+            if floor > 0.0:
+                extra["floor_engaged"] = 1.0
         if support is None or support[:2] != (self.n_remesh, n):
             self._last_tip_fit_support = (self.n_remesh, n, tuple(near))
             self._last_tip_fit_curvature = two_h
@@ -2359,6 +2361,16 @@ class StokesTipCoalescence(Problem):
         capped = scale_before != rho_before or scale_after != rho_after
         gaps = [g for g in (before.get("gap_half_height"), after.get("gap_half_height"))
                 if g is not None and math.isfinite(g) and g > 0]
+        # Once the tip-scale floor is engaged and either state is clamped (capped or floored), the apex
+        # is flat on the gap scale and the fitted radius and curvature are fit noise there (|kappa| G
+        # spans 0.1 to 8 between meshes of one geometry); the scale is confined to [floor, 1] times the
+        # cap.  Continuity is then judged on the gap half-height alone, beside the time, neck-radius and
+        # volume checks above.  Two unclamped states keep the radius check below.
+        if (before.get("floor_engaged") and after.get("floor_engaged") and len(gaps) == 2 and valid
+                and capped):
+            if not 0.5 <= gaps[1] / gaps[0] <= 2.0:
+                raise RuntimeError("valid-state recovery remesh changed gap half-height excessively")
+            return
         if valid:
             if capped and len(gaps) == 2:
                 if not 0.5 <= gaps[1] / gaps[0] <= 2.0:

@@ -395,6 +395,44 @@ class NewtonGateTests(unittest.TestCase):
         value = eval(expr.replace("^", "**"), {"sqrt": math.sqrt, "x": 1.0, "y": 120.0})   # noqa: S307 (test literal)
         self.assertAlmostEqual(value, math.hypot(1.15034367107065086, 2.04557883366792), places=12)
 
+    def test_engaged_floor_recovery_judges_continuity_on_the_gap(self) -> None:
+        # Recovery remeshes of late flat apexes (geometry unchanged, fits on the new mesh disagree):
+        # each is refused on its fitted radius or curvature without the floor, accepted with it.
+        cases = [
+            ((1.084e-4, -9224.0, 1.084e-4, 1.8423666e-4), (1.028e-3, 973.0, 1.028e-3, 1.8424831e-4), "tip radius"),
+            ((1.059e-3, 944.0, 8.929e-4, 1.4881991e-4), (3.591e-4, -2785.0, 3.591e-4, 1.4880942e-4), "curvature"),
+            ((2.315e-4, 4320.0, 2.315e-4, 1.4381122e-4), (1.817e-05, -55042.0, 1.817e-05, 1.4381127e-4), "tip radius"),
+        ]
+        base = {"t": 1.0, "R_min": 1.5e-2, "volume": 4.1888}
+        for (rb, kb, sb, gb), (ra, ka, sa, ga), refused in cases:
+            before = dict(base, tip_radius=rb, kappa_m=kb, tip_scale=sb, gap_half_height=gb)
+            after = dict(base, tip_radius=ra, kappa_m=ka, tip_scale=sa, gap_half_height=ga)
+            with self.assertRaisesRegex(RuntimeError, refused):
+                StokesTipCoalescence.verify_recovery_remesh(before, after)
+            floored = lambda st: dict(st, tip_scale=capped_tip_scale(st["tip_radius"], st["gap_half_height"], 6.0, 0.4),  # noqa: E731
+                                      floor_engaged=1.0)
+            StokesTipCoalescence.verify_recovery_remesh(floored(before), floored(after))
+            with self.assertRaisesRegex(RuntimeError, "gap half-height"):
+                StokesTipCoalescence.verify_recovery_remesh(floored(before), dict(floored(after), gap_half_height=3 * ga))
+            with self.assertRaisesRegex(RuntimeError, "volume"):
+                StokesTipCoalescence.verify_recovery_remesh(floored(before), dict(floored(after), volume=4.2))
+
+    def test_engaged_floor_keeps_the_radius_check_between_floor_and_cap(self) -> None:
+        # Latched floor, both scales strictly between floor (2.4 G) and cap (6 G): a 2.2x radius change
+        # of an unclamped tip is still refused.
+        base = {"t": 1.0, "R_min": 1.5e-2, "volume": 4.1888, "gap_half_height": 1e-3, "floor_engaged": 1.0}
+        before = dict(base, tip_radius=2.5e-3, kappa_m=-400.0, tip_scale=2.5e-3)
+        after = dict(base, tip_radius=5.5e-3, kappa_m=-1 / 5.5e-3, tip_scale=5.5e-3)
+        with self.assertRaisesRegex(RuntimeError, "tip radius"):
+            StokesTipCoalescence.verify_recovery_remesh(before, after)
+
+    def test_neck_state_flags_an_engaged_floor_only(self) -> None:
+        import inspect
+        src = inspect.getsource(StokesTipCoalescence.neck_state)
+        self.assertIn('extra["floor_engaged"] = 1.0', src)
+        self.assertLess(src.index("floor = self.tip_scale_floor if self.cap_engaged else 0.0"),
+                        src.index('extra["floor_engaged"] = 1.0'))
+
     def test_capped_recovery_still_checks_the_fitted_curvature(self) -> None:
         base = {"t": 1.0, "R_min": 1e-2, "volume": 4.0}
         before = dict(base, tip_radius=1e-4, kappa_m=-1e4, tip_scale=1e-5)
