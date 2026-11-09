@@ -361,14 +361,16 @@ def point_distance_expression(cx: float, cy: float) -> str:
     return f"sqrt((x-({cx!r}))^2+(y-({cy!r}))^2)"
 
 
-def capped_tip_scale(rho: float, gap: float, cap: float) -> float:
+def capped_tip_scale(rho: float, gap: float, cap: float, floor: float = 0.0) -> float:
     """Tip length scale for meshing and remesh triggers: rho, at most cap gap half-heights.
 
     cap = 0 is off.  Past the inertial bulb transition the plane-node circle fit of a
-    blunt apex can read radii far beyond the gap that bounds the meniscus.
+    blunt apex can read radii far beyond the gap that bounds the meniscus.  floor (a
+    fraction of the cap, 0 = off) bounds the scale from below at floor * cap gap
+    half-heights.
     """
     if cap > 0.0 and math.isfinite(gap) and gap > 0.0:
-        return min(rho, cap * gap)
+        return max(min(rho, cap * gap), floor * cap * gap)
     return rho
 
 
@@ -1182,6 +1184,7 @@ class StokesTipCoalescence(Problem):
         crest_window: float = 0.25,
         tip_fit_support: float = 0.0,
         tip_gap_cap: float = 0.0,
+        tip_scale_floor: float = 0.0,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1341,6 +1344,17 @@ class StokesTipCoalescence(Problem):
             raise ValueError("tip_fit_support must lie in [0, 1)")
         if not (math.isfinite(self.tip_gap_cap) and self.tip_gap_cap >= 0.0):
             raise ValueError("tip_gap_cap must be non-negative")
+        # tip_scale_floor: once an accepted state has been capped (a flat apex), the tip scale
+        # is kept at no less than this fraction of the cap.  On a flat apex the fit can alternate
+        # between the flat face (a fine mesh, scale capped) and the meniscus turn (a coarse mesh,
+        # scale about one gap half-height), and each reading sizes the next mesh; keeping the
+        # scale within a factor 1/floor of the cap below the grow trigger ends that cycle.
+        # Inert until the cap first engages (0 = off).
+        self.tip_scale_floor = float(tip_scale_floor)
+        if not (math.isfinite(self.tip_scale_floor) and 0.0 <= self.tip_scale_floor < 1.0):
+            raise ValueError("tip_scale_floor must lie in [0, 1)")
+        if self.tip_scale_floor > 0.0 and self.tip_gap_cap <= 0.0:
+            raise ValueError("tip_scale_floor requires tip_gap_cap")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -1369,6 +1383,10 @@ class StokesTipCoalescence(Problem):
         # Lagged mesh parameters (set at each remesh).
         self.tip_radius_lagged = float(self._restart["tip_radius_lagged"]) if self._restart else self.Z0
         self.rho_at_remesh = float(self._restart["rho_at_remesh"]) if self._restart else self.Z0
+        self.cap_engaged = bool(self._restart.get("cap_engaged", False)) if self._restart else False
+        # A capped state observed just before a remesh inside an attempted step; committed to
+        # cap_engaged only if that step is accepted (pyoomph remeshes before solve returns).
+        self._pending_cap_observation = False
         self.rmin_at_remesh = R_start
         self.last_rmin = R_start
         # The restart's first mesh is the remesh that followed the saved state.
@@ -1787,7 +1805,8 @@ class StokesTipCoalescence(Problem):
         tip_scale = tip_radius
         if self.tip_gap_cap > 0.0:
             gap = gap_half_height(self.interface_polyline(), 1.05 * rmin - self._frame_shift_now())
-            tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap)
+            floor = self.tip_scale_floor if self.cap_engaged else 0.0
+            tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap, floor)
             extra["gap_half_height"] = gap
         if support is None or support[:2] != (self.n_remesh, n):
             self._last_tip_fit_support = (self.n_remesh, n, tuple(near))
@@ -1867,6 +1886,9 @@ class StokesTipCoalescence(Problem):
             poly=numpy.asarray(self._pre_remesh_poly, dtype=float),
             t=float(state["t"]), R_min=float(state["R_min"]), u_neck=float(state["u_neck"]),
             tip_radius_lagged=float(self.tip_radius_lagged), rho_at_remesh=float(self.rho_at_remesh),
+            # The saved state is the one being remeshed: if it is capped, a restart from it starts
+            # engaged, as the continuing run does once this step is accepted.
+            cap_engaged=bool(self.cap_engaged or self._pending_cap_observation),
             n_remesh=int(self.n_remesh), steps=int(self._steps), dt=float(self._dt),
             frame_shift_phys=float(self.frame_shift_phys),
         )
@@ -1882,7 +1904,7 @@ class StokesTipCoalescence(Problem):
             folder / f"snap_{self._n_snapshots:04d}.npz",
             poly=numpy.asarray(self.interface_polyline(), dtype=float),
             t=float(state["t"]), R_min=float(state["R_min"]), u_neck=float(state["u_neck"]),
-            tip_radius_lagged=float(rho), rho_at_remesh=float(rho),
+            tip_radius_lagged=float(rho), rho_at_remesh=float(rho), cap_engaged=bool(self.cap_engaged),
             n_remesh=int(self.n_remesh), steps=int(self._steps), dt=float(self._dt),
             frame_shift_phys=float(state["R_min"]) if self.neck_frame_moving else float(self.frame_shift_phys),
         )
@@ -2213,8 +2235,27 @@ class StokesTipCoalescence(Problem):
             return f"tip radius grew to {rho:.3e} from {ref:.3e}"
         return None
 
+    def is_capped_state(self, st: dict[str, float]) -> bool:
+        """True when the floor is on and the state's fitted radius lies beyond the gap cap."""
+        gap = st.get("gap_half_height")
+        return (self.tip_scale_floor > 0.0 and gap is not None and math.isfinite(gap) and gap > 0.0
+                and math.isfinite(st["tip_radius"]) and st["tip_radius"] > self.tip_gap_cap * gap)
+
+    def _discard_trial_observations(self) -> None:
+        """Forget observations made during a failed attempt (its state is rolled back)."""
+        self._pending_cap_observation = False
+
+    def note_cap_engaged(self, st: dict[str, float]) -> None:
+        """Commit an accepted step: engage the floor if the accepted state, or the state seen just
+        before a remesh inside that step, was capped; then clear the pending observation."""
+        if self._pending_cap_observation or self.is_capped_state(st):
+            self.cap_engaged = True
+        self._pending_cap_observation = False
+
     def actions_before_remeshing(self, active_remeshers):
         st = self.neck_state()
+        if self.is_capped_state(st):
+            self._pending_cap_observation = True
         rho = st.get("tip_scale", st["tip_radius"])
         if self.tip_unresolved(rho):
             # Build the next mesh at the floor; the measured radius is noise there.
@@ -2435,6 +2476,7 @@ class StokesTipCoalescence(Problem):
             self._record_quality_baseline()
             quality_remesh_used = False
             for _attempt in range(6):
+                self._pending_cap_observation = False    # observations of failed attempts are discarded
                 snapshot = self._dof_snapshot()
                 # Compare the time-discrete states on one fit support. A
                 # support-selection change is not physical curvature evolution.
@@ -2454,6 +2496,9 @@ class StokesTipCoalescence(Problem):
                     break
                 except Exception as exc:  # Newton failure: restore the pre-step state, retry smaller
                     print(f"step failed at dt={dt:.3e}: {exc!r}; restoring and reducing", flush=True)
+                    # The failed trial's observations do not belong to the restored state, which any
+                    # recovery remesh below checkpoints.
+                    self._discard_trial_observations()
                     try:
                         print("NEWTON RESIDUAL HISTORY:", list(self.get_last_residual_convergence()), flush=True)
                         if _attempt == 0 and "OomphException" in repr(exc):
@@ -2545,6 +2590,7 @@ class StokesTipCoalescence(Problem):
                           f"u*dt={expected:.6e}, ratio={ratio:.6e}", flush=True)
                     status = "kinematic_failure"
                     break
+            self.note_cap_engaged(st)
             scale = st.get("tip_scale", st["tip_radius"])
             if self.tip_refine and math.isfinite(scale) and scale > 0 and st["h_tip_now"] <= scale / 4:
                 self.tip_radius_lagged = scale  # trust the measurement only when resolved
@@ -2591,6 +2637,7 @@ class StokesTipCoalescence(Problem):
                 "quality_remesh_ratio": self.quality_remesh_ratio,
                 "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
                 "tip_fit_support": self.tip_fit_support, "tip_gap_cap": self.tip_gap_cap,
+                "tip_scale_floor": self.tip_scale_floor,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "newton_tolerance": self.newton_tolerance,

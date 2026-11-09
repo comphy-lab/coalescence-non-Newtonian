@@ -197,6 +197,135 @@ class NewtonGateTests(unittest.TestCase):
         self.assertEqual(capped_tip_scale(1.0, 0.2, 6.0), 1.0)      # below the cap: unchanged
         self.assertEqual(capped_tip_scale(5.0, math.inf, 6.0), 5.0)
 
+    def test_tip_scale_floor_bounds_a_capped_scale_from_below(self) -> None:
+        self.assertEqual(capped_tip_scale(0.05, 0.2, 6.0), 0.05)                  # no floor: unchanged
+        self.assertAlmostEqual(capped_tip_scale(0.05, 0.2, 6.0, 0.4), 0.48)       # floor 0.4 * 6 * 0.2
+        self.assertAlmostEqual(capped_tip_scale(0.6, 0.2, 6.0, 0.4), 0.6)         # between floor and cap
+        self.assertAlmostEqual(capped_tip_scale(5.0, 0.2, 6.0, 0.4), 1.2)         # cap still applies
+        self.assertEqual(capped_tip_scale(0.05, 0.2, 0.0, 0.4), 0.05)             # cap off: floor off
+        self.assertEqual(capped_tip_scale(0.05, math.inf, 6.0, 0.4), 0.05)        # no gap: unchanged
+
+    def test_tip_scale_floor_breaks_the_flat_round_remesh_cycle(self) -> None:
+        # A late flat apex read alternately as the flat face (fitted radius beyond 6 G, capped) and
+        # as the meniscus turn (radius below one G), G = 1.25e-4.  Without the floor the scale
+        # alternates by more than the grow trigger (3); with floor 0.4 it stays within 2.5 of the cap.
+        gap, cap, grow, shrink = 1.25e-4, 6.0, 3.0, 0.7
+        flat, turn = 1.48e-3, 1.06e-4
+        hi, lo = capped_tip_scale(flat, gap, cap), capped_tip_scale(turn, gap, cap)
+        self.assertGreater(hi / lo, grow)
+        self.assertLess(lo / hi, shrink)
+        hi_f, lo_f = capped_tip_scale(flat, gap, cap, 0.4), capped_tip_scale(turn, gap, cap, 0.4)
+        self.assertLess(hi_f / lo_f, grow)          # the flat reading no longer triggers a coarser remesh
+
+    def test_tip_scale_floor_engages_only_after_an_accepted_capped_state(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            self.assertFalse(problem.cap_engaged)
+            gap = 1e-3
+            problem.note_cap_engaged({"tip_radius": 5e-3, "gap_half_height": gap})   # round tip below the cap
+            self.assertFalse(problem.cap_engaged)
+            problem.note_cap_engaged({"tip_radius": 7e-3, "tip_scale": 6e-3})        # no gap recorded
+            self.assertFalse(problem.cap_engaged)
+            problem.note_cap_engaged({"tip_radius": 7e-3, "gap_half_height": gap})   # flat: beyond 6 G
+            self.assertTrue(problem.cap_engaged)
+            off = self._moving_problem(out, tip_gap_cap=6.0)
+            off.note_cap_engaged({"tip_radius": 7e-3, "gap_half_height": gap})
+            self.assertFalse(off.cap_engaged)                                         # floor off: never engaged
+
+    def test_tip_scale_floor_keeps_a_capped_state_seen_before_a_remesh_in_an_accepted_step(self) -> None:
+        # pyoomph remeshes inside solve: the accepted step's post-remesh fit can be uncapped
+        # although the pre-remesh state was capped.  The observation survives to the commit.
+        gap = 1.25e-4
+        capped = {"R_min": 5.2e-2, "tip_radius": 1.48e-3, "tip_scale": 7.5e-4, "gap_half_height": gap}
+        uncapped = {"R_min": 5.2e-2, "tip_radius": 1.06e-4, "tip_scale": 3e-4, "gap_half_height": gap}
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            with patch.object(problem, "neck_state", return_value=capped), \
+                    patch.object(problem, "interface_polyline", return_value=[(0.0, 0.0), (1.0, 1.0)]), \
+                    patch.object(problem, "write_restart_state"), \
+                    patch.object(Problem, "actions_before_remeshing"):
+                problem.actions_before_remeshing(set())
+            self.assertFalse(problem.cap_engaged)                # pending until the step is accepted
+            problem.note_cap_engaged(uncapped)
+            self.assertTrue(problem.cap_engaged)
+            self.assertAlmostEqual(capped_tip_scale(uncapped["tip_radius"], gap, 6.0, 0.4), 3e-4)
+            self.assertFalse(problem._pending_cap_observation)  # the commit clears the observation
+            off = self._moving_problem(out, tip_gap_cap=6.0)
+            with patch.object(off, "neck_state", return_value=capped), \
+                    patch.object(off, "interface_polyline", return_value=[(0.0, 0.0), (1.0, 1.0)]), \
+                    patch.object(off, "write_restart_state"), \
+                    patch.object(Problem, "actions_before_remeshing"):
+                off.actions_before_remeshing(set())
+            self.assertFalse(off._pending_cap_observation)        # floor off: nothing recorded
+
+    def test_remesh_checkpoint_of_the_first_capped_state_restarts_engaged(self) -> None:
+        import numpy
+        from pathlib import Path
+        gap = 1.25e-4
+        capped = {"t": 3.5, "R_min": 5.2e-2, "u_neck": 6e-3, "tip_radius": 1.48e-3, "tip_scale": 7.5e-4,
+                  "gap_half_height": gap}
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            Path(out).mkdir(parents=True, exist_ok=True)
+            with patch.object(problem, "neck_state", return_value=capped), \
+                    patch.object(problem, "interface_polyline", return_value=[(0.0, 0.0), (1e-3, 1e-4), (-1e-2, 1.0)]), \
+                    patch.object(Problem, "actions_before_remeshing"):
+                problem.actions_before_remeshing(set())
+            self.assertFalse(problem.cap_engaged)                  # not yet accepted
+            files = sorted((Path(out) / "restart").glob("remesh_*.npz"))
+            self.assertEqual(len(files), 1)
+            saved = dict(numpy.load(files[0]))
+            self.assertTrue(bool(saved["cap_engaged"]))            # the checkpointed state is capped
+            restarted = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4, restart=saved)
+            self.assertTrue(restarted.cap_engaged)
+
+    def test_failed_capped_trial_does_not_engage_the_recovery_checkpoint(self) -> None:
+        # A capped trial remeshes and then fails; the campaign restores the uncapped state and a
+        # recovery remesh checkpoints it.  That checkpoint must not carry the trial's observation.
+        import inspect
+        import numpy
+        from pathlib import Path
+        gap = 1.25e-4
+        capped = {"t": 3.5, "R_min": 5.2e-2, "u_neck": 6e-3, "tip_radius": 1.48e-3, "tip_scale": 7.5e-4,
+                  "gap_half_height": gap}
+        restored = {"t": 3.49, "R_min": 5.19e-2, "u_neck": 6e-3, "tip_radius": 1.06e-4, "tip_scale": 1.06e-4,
+                    "gap_half_height": gap}
+        poly = [(0.0, 0.0), (1e-3, 1e-4), (-1e-2, 1.0)]
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            with patch.object(problem, "interface_polyline", return_value=poly), \
+                    patch.object(Problem, "actions_before_remeshing"):
+                with patch.object(problem, "neck_state", return_value=capped):
+                    problem.actions_before_remeshing(set())          # the trial's remesh
+                self.assertTrue(problem._pending_cap_observation)
+                problem._discard_trial_observations()                # the failed attempt
+                problem.n_remesh += 1
+                with patch.object(problem, "neck_state", return_value=restored):
+                    problem.actions_before_remeshing(set())          # the recovery remesh
+            files = sorted((Path(out) / "restart").glob("remesh_*.npz"))
+            self.assertEqual(len(files), 2)
+            self.assertFalse(bool(dict(numpy.load(files[-1]))["cap_engaged"]))
+            problem.note_cap_engaged(restored)
+            self.assertFalse(problem.cap_engaged)
+        # The campaign's failure handler discards the observations before any recovery remesh.
+        src = inspect.getsource(StokesTipCoalescence.run_campaign)
+        handler = src[src.index("except Exception as exc:  # Newton failure"):]
+        self.assertLess(handler.index("_discard_trial_observations()"), handler.index("force_remesh"))
+
+    def test_snapshot_restart_keeps_the_engaged_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            problem.cap_engaged = True
+            state = {"t": 1.0, "R_min": 1e-2, "u_neck": 1e-2, "tip_radius": 1.06e-4, "tip_scale": 3e-4}
+            with patch.object(problem, "interface_polyline", return_value=[(0.0, 0.0), (1e-3, 1e-4), (-1e-2, 1.0)]):
+                problem.write_snapshot(state)
+            import numpy
+            from pathlib import Path
+            saved = dict(numpy.load(Path(out) / "snapshots" / "snap_0000.npz"))
+            self.assertTrue(bool(saved["cap_engaged"]))
+            restarted = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4, restart=saved)
+            self.assertTrue(restarted.cap_engaged)
+
     def test_gap_is_exact_on_q2_edges_and_unchanged_by_subdivision(self) -> None:
         def curve(t):                              # one quadratic edge whose minimum lies between its nodes
             return (2.0 + t, (t - 0.75) ** 2 + 1e-4)
@@ -726,6 +855,11 @@ class NewtonGateTests(unittest.TestCase):
             self.assertEqual((problem.tip_fit_support, problem.tip_gap_cap), (0.0, 0.0))
             for bad in ({"tip_fit_support": -0.1}, {"tip_fit_support": 1.0}, {"tip_fit_support": float("nan")},
                         {"tip_gap_cap": -1.0}, {"tip_gap_cap": float("inf")}):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, **bad)
+            self.assertEqual(problem.tip_scale_floor, 0.0)
+            for bad in ({"tip_scale_floor": -0.1, "tip_gap_cap": 6.0}, {"tip_scale_floor": 1.0, "tip_gap_cap": 6.0},
+                        {"tip_scale_floor": float("nan"), "tip_gap_cap": 6.0}, {"tip_scale_floor": 0.4}):
                 with self.assertRaises(ValueError):
                     self._moving_problem(out, **bad)
 
