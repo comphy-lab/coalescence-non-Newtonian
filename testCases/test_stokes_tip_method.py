@@ -426,6 +426,51 @@ class NewtonGateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "tip radius"):
             StokesTipCoalescence.verify_recovery_remesh(before, after)
 
+    def test_clamped_flat_apex_curvature_does_not_steer_the_time_step(self) -> None:
+        # A floored late apex (G = 4.95e-4, cap 6, floor 0.4: scale >= 1.19e-3) whose fit on an unrefined
+        # mesh shrinks to 1.4e-4 while 2H grows twentyfold: the reading must not cut dt.
+        gap = 4.95e-4
+        floored = {"t": 1.3115, "R_min": 3.289e-2, "u_neck": 1.14e-2, "two_H": -7122.0, "tip_radius": 1.4e-4,
+                   "tip_scale": capped_tip_scale(1.4e-4, gap, 6.0, 0.4), "gap_half_height": gap, "floor_engaged": 1.0}
+        between = dict(floored, tip_radius=2e-3, tip_scale=2e-3)                    # unclamped: still trusted
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            self.assertTrue(problem.curvature_reading_ignored(floored))
+            self.assertFalse(problem.curvature_reading_ignored(between))
+            self.assertFalse(problem.curvature_reading_ignored({k: v for k, v in floored.items() if k != "floor_engaged"}))
+            problem._dt, problem._last_curvature_ratio, problem._regrow = 2.4e-5, 4.0, False
+            self.assertAlmostEqual(problem.choose_dt(floored), 2.4e-5 * problem.dt_growth)   # grows, not cut
+            self.assertLess(problem.choose_dt(between), 2.4e-5)                              # trusted reading cuts it
+            off = self._moving_problem(out, tip_gap_cap=6.0)
+            off._dt, off._last_curvature_ratio, off._regrow = 2.4e-5, 4.0, False
+            self.assertLess(off.choose_dt({k: v for k, v in floored.items() if k != "floor_engaged"}), 2.4e-5)
+
+    def test_alternating_clamped_and_trusted_readings_do_not_shrink_the_step(self) -> None:
+        # gap 1e-3, cap 6, floor 0.4: radius 7e-3 is capped (scale 6e-3), 5.5e-3 is trusted.  Every accepted
+        # step has an ignored endpoint, so the controller never shortens dt (12 alternating steps).
+        gap = 1e-3
+        def state(rho):
+            return {"R_min": 3e-2, "u_neck": 1e-2, "two_H": -1.0 / rho, "tip_radius": rho,
+                    "tip_scale": capped_tip_scale(rho, gap, 6.0, 0.4), "gap_half_height": gap, "floor_engaged": 1.0}
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
+            problem._dt, problem._regrow, problem._trial_curvature_ratio = 1e-4, False, None
+            seq = [state(7e-3 if k % 2 == 0 else 5.5e-3) for k in range(13)]
+            for prev, cur in zip(seq[:-1], seq[1:]):
+                problem._last_curvature_ratio = problem.step_curvature_ratio(prev, cur)
+                self.assertEqual(problem._last_curvature_ratio, 1e-12)
+                problem._dt = problem.choose_dt(cur)
+            self.assertGreaterEqual(problem._dt, 1e-4)
+            # Two trusted endpoints still report their change.
+            self.assertGreater(problem.step_curvature_ratio(state(5.5e-3), state(4e-3)), 0.0)
+            self.assertNotEqual(problem.step_curvature_ratio(state(5.5e-3), state(4e-3)), 1e-12)
+
+    def test_step_curvature_limit_skips_a_clamped_floored_state(self) -> None:
+        import inspect
+        src = inspect.getsource(StokesTipCoalescence.actions_after_newton_solve)
+        self.assertIn("self.curvature_reading_ignored(self._step_state_before_newton)", src)
+        self.assertIn("self.curvature_reading_ignored(current_state)", src)
+
     def test_neck_state_flags_an_engaged_floor_only(self) -> None:
         import inspect
         src = inspect.getsource(StokesTipCoalescence.neck_state)

@@ -1435,6 +1435,29 @@ class StokesTipCoalescence(Problem):
         margin = 1.5 if self.tip_map_linear_core > 0 else 4.0
         return rr > 0.0 and (not math.isfinite(rho) or rho < margin * rr)
 
+    def curvature_reading_ignored(self, st: dict[str, float]) -> bool:
+        """True when the fitted tip curvature of a state must not steer the time step.
+
+        Below the resolvable radius the reading is precision noise.  Once the tip-scale floor is
+        engaged, a clamped state (its scale capped or floored away from the fitted radius) has a
+        flat apex on the gap scale, where the fit depends on the mesh rather than on the
+        geometry: on an unrefined mesh it can shrink geometrically while a refined mesh reads
+        the apex as flat, and steering the step by it drives dt towards zero.
+        """
+        rho = st["tip_radius"]
+        if self.tip_unresolved(rho):
+            return True
+        return bool(st.get("floor_engaged")) and st.get("tip_scale", rho) != rho
+
+    def step_curvature_ratio(self, st_prev: dict[str, float], st: dict[str, float]) -> float:
+        """Curvature change of an accepted step for the step controller; neutral (1e-12) when
+        either endpoint's reading is ignored, so an ignored reading never shortens the next step."""
+        if self.curvature_reading_ignored(st_prev) or self.curvature_reading_ignored(st):
+            return 1e-12
+        if self._trial_curvature_ratio is not None:
+            return self._trial_curvature_ratio
+        return self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
+
     def define_problem(self):
         Rn = var("R_neck", domain="globals") if self.neck_stretch else None
         if self.neck_frame:
@@ -2167,7 +2190,8 @@ class StokesTipCoalescence(Problem):
                 current_rho = current_state["tip_radius"]
                 if not all(math.isfinite(v) and v > 0 for v in (previous_rho, current_rho)):
                     raise RuntimeError("tip radius is invalid after Newton solve")
-                if not (self.tip_unresolved(previous_rho) or self.tip_unresolved(current_rho)):
+                if not (self.curvature_reading_ignored(self._step_state_before_newton)
+                        or self.curvature_reading_ignored(current_state)):
                     change = self.curvature_change_ratio(previous, current)
                     self._trial_curvature_ratio = change
                     if not math.isfinite(change) or change > self.curvature_step_limit:
@@ -2423,8 +2447,8 @@ class StokesTipCoalescence(Problem):
         u = max(abs(st["u_neck"]), 1e-3)
         dt_phys = self.dt_fraction * st["R_min"] / u
         ratio = max(self._last_curvature_ratio, 1e-12)
-        if self.tip_unresolved(st["tip_radius"]):
-            ratio = 1e-12          # curvature reading is noise below the resolvable tip radius
+        if self.curvature_reading_ignored(st):
+            ratio = 1e-12          # curvature reading is noise (unresolved tip, or a clamped flat apex)
         factor = math.sqrt(self.curvature_change_target / ratio)
         growth = 2.0 if getattr(self, "_regrow", False) else self.dt_growth
         factor = min(growth, max(0.5, factor))
@@ -2606,10 +2630,7 @@ class StokesTipCoalescence(Problem):
             scale = st.get("tip_scale", st["tip_radius"])
             if self.tip_refine and math.isfinite(scale) and scale > 0 and st["h_tip_now"] <= scale / 4:
                 self.tip_radius_lagged = scale  # trust the measurement only when resolved
-            self._last_curvature_ratio = (
-                self._trial_curvature_ratio if self._trial_curvature_ratio is not None
-                else self.curvature_change_ratio(st_prev["two_H"], st["two_H"])
-            )
+            self._last_curvature_ratio = self.step_curvature_ratio(st_prev, st)
             iters = None
             try:
                 iters = int(self.get_last_newton_iterations())
