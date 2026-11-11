@@ -614,6 +614,68 @@ class NewtonGateTests(unittest.TestCase):
                     self.assertLess(attempted[-1], problem.dt_initial)
                 self.assertEqual(frames[-1], 10.0)
 
+    def _retry_campaign(self, preserve: bool, fails=(2,), message="OomphException: max residual exceeded",
+                        template=None, max_steps=3):
+        """Mocked campaign; the solve calls listed in ``fails`` raise after the history shift."""
+        out = tempfile.mkdtemp()
+        problem = StokesTipCoalescence(
+            R0=1e-6, Z0=5e-13, output_dir=out, dt_initial=0.004, dt_max=0.005, R_stop=10.0,
+            tip_map_alpha=0.5, neck_frame=True, neck_frame_moving=True, preserve_history_on_retry=preserve,
+        )
+        live = {'t': 0.0, 'R_min': 1.0, 'u_neck': 0.1, 'two_H': 1.0, 'tip_radius': 1.0, 'volume': 4.18879,
+                'h_tip_now': 0.01}
+        calls, restores = [], []
+
+        def solve(*, timestep, shift_values=True, **kwargs):
+            calls.append((timestep, shift_values))
+            problem._history_shifted = True              # oomph-lib shifted the history for this attempt
+            if len(calls) in fails:
+                raise RuntimeError(message)
+            live['t'] += timestep
+
+        with patch.multiple(
+            problem, is_initialised=Mock(return_value=True), refine_tip=Mock(),
+            neck_state=Mock(side_effect=lambda: live.copy()), write_row=Mock(), write_profile=Mock(),
+            interface_polyline=Mock(return_value=[]), ndof=Mock(return_value=0),
+            choose_dt=Mock(return_value=0.004), _dof_snapshot=Mock(return_value={}),
+            _dof_restore=Mock(side_effect=lambda snap, keep_history=False: restores.append(keep_history)),
+            solve=Mock(side_effect=solve), write_snapshot=Mock(), _discard_trial_observations=Mock(),
+            get_last_residual_convergence=Mock(return_value=[]), debug_largest_residual=Mock(),
+            force_remesh=Mock(side_effect=RuntimeError("remesh retry failed")), _template=template,
+        ):
+            summary = problem.run_campaign(max_steps=max_steps)
+        problem._summary = summary
+        return problem, calls, restores
+
+    def test_failed_step_keeps_the_bdf_history_when_requested(self) -> None:
+        problem, calls, restores = self._retry_campaign(preserve=True)
+        self.assertEqual(restores, [True])                        # restored without an impulsive reset
+        self.assertEqual([s for _, s in calls], [True, True, False, True])   # the retry does not shift again
+        self.assertAlmostEqual(calls[2][0], 0.3 * calls[1][0])
+        self.assertEqual(problem.n_history_preserving_retries, 1)
+        self.assertFalse(problem._retry_no_shift)                  # cleared by the next step
+
+    def test_exhausted_retries_count_only_the_retries_that_ran(self) -> None:
+        problem, calls, restores = self._retry_campaign(preserve=True, fails=tuple(range(2, 8)))
+        self.assertEqual(problem._summary['status'], 'newton_failure')
+        self.assertEqual([s for _, s in calls], [True, True, False, False, False, False, False])
+        self.assertEqual(problem.n_history_preserving_retries, 5)            # five no-shift retries started
+        self.assertEqual(problem._summary['n_history_preserving_retries'], 5)
+
+    def test_failed_spline_recovery_falls_back_to_an_impulsive_retry(self) -> None:
+        # The spline branch restores impulsively before its remesh fails: the retry must shift normally.
+        problem, calls, restores = self._retry_campaign(preserve=True, message="Cannot invert spline",
+                                                        template=object())
+        self.assertEqual(restores, [False, False])
+        self.assertEqual([s for _, s in calls], [True, True, True, True])
+        self.assertEqual(problem.n_history_preserving_retries, 0)
+
+    def test_failed_step_restarts_impulsively_by_default(self) -> None:
+        problem, calls, restores = self._retry_campaign(preserve=False)
+        self.assertEqual(restores, [False])
+        self.assertEqual([s for _, s in calls], [True, True, True, True])
+        self.assertEqual(problem.n_history_preserving_retries, 0)
+
     def test_invalid_timestep_controls_do_not_create_output(self) -> None:
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:

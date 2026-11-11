@@ -1136,6 +1136,7 @@ class StokesTipCoalescence(Problem):
         capillary_steps_per_period: float = 0.0,
         capillary_period_coefficient: float = 4.0,
         capillary_step_onset: float = 10.0,
+        preserve_history_on_retry: bool = False,
         newton_tolerance: float = 1e-7,
         R_stop: float = 0.03,
         h_tip_floor: float = 1e-11,
@@ -1227,6 +1228,13 @@ class StokesTipCoalescence(Problem):
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.capillary_steps_per_period > 0 and (Oh is None or self.capillary_period_coefficient <= 0):
             raise ValueError("the capillary step ceiling needs a finite Oh and a positive period coefficient")
+        # Retry a failed Newton step on an unchanged mesh without discarding the BDF history: the failed
+        # attempt has shifted the history once (level 1 = x_n, level 2 = x_{n-1}), so restoring the current
+        # values and time and retrying with shift_values=False keeps second order.  Off: impulsive restart.
+        self.preserve_history_on_retry = bool(preserve_history_on_retry)
+        self._history_shifted = False
+        self._retry_no_shift = False
+        self.n_history_preserving_retries = 0
         self._last_curvature_ratio = 0.0
         self.newton_tolerance = float(newton_tolerance)
         self.R_stop = float(R_stop)
@@ -2115,7 +2123,7 @@ class StokesTipCoalescence(Problem):
         }
         return t, numpy.array(dofs, copy=True), numpy.array(pinned, copy=True), remesh_state
 
-    def _dof_restore(self, snap) -> None:
+    def _dof_restore(self, snap, keep_history: bool = False) -> None:
         t, dofs, pinned, remesh_state = snap
         if self.n_remesh != remesh_state["n_remesh"] or id(self.get_mesh("drop")) != remesh_state["mesh_id"]:
             raise RuntimeError("cannot restore pre-remesh DOFs after the mesh changed")
@@ -2131,11 +2139,12 @@ class StokesTipCoalescence(Problem):
         self._pre_remesh_poly = remesh_state["pre_remesh_poly"]
         self._pending_remesh_reason = remesh_state["pending_remesh_reason"]
         self._mesh_receipt = remesh_state["mesh_receipt"]
-        # A failed unsteady solve has shifted the history; restart impulsively (BDF1 step).
-        self.assign_initial_values_impulsive()
-        self.timestepper.set_num_unsteady_steps_done(0)
-        self._taken_already_an_unsteady_step = False
-        self._dt_prev = None
+        if not keep_history:
+            # A failed unsteady solve has shifted the history; restart impulsively (BDF1 step).
+            self.assign_initial_values_impulsive()
+            self.timestepper.set_num_unsteady_steps_done(0)
+            self._taken_already_an_unsteady_step = False
+            self._dt_prev = None
         self.invalidate_cached_mesh_data()
 
     # -------------------------------------------------------------- predictor
@@ -2148,6 +2157,7 @@ class StokesTipCoalescence(Problem):
         translation, which is what makes u*dt >> tip radius steps converge.  After an
         impulsive restart the two history levels coincide and the predictor is inert.
         """
+        self._history_shifted = True          # runs after oomph-lib's history shift for this attempt
         self._newton_iteration = 0
         self._newton_tolerance_before_gate = self.newton_solver_tolerance
         guess = getattr(self, "_first_newton_guess", None)
@@ -2535,6 +2545,7 @@ class StokesTipCoalescence(Problem):
             fresh_at_start = self._fresh_mesh
             self._record_quality_baseline()
             quality_remesh_used = False
+            self._retry_no_shift = False
             for _attempt in range(6):
                 self._pending_cap_observation = False    # observations of failed attempts are discarded
                 snapshot = self._dof_snapshot()
@@ -2546,8 +2557,12 @@ class StokesTipCoalescence(Problem):
                 self._dt = dt
                 self._predict_now = True
                 self._step_state_before_newton = st
+                remesh_before_attempt = self.n_remesh
+                self._history_shifted = False
+                if self._retry_no_shift:
+                    self.n_history_preserving_retries += 1
                 try:
-                    self.solve(timestep=dt, do_not_set_IC=True,
+                    self.solve(timestep=dt, do_not_set_IC=True, shift_values=not self._retry_no_shift,
                                globally_convergent_newton=self.line_search)
                     # The max-residual test is dominated by far-field rows whose weights exceed
                     # the tip rows by ~20 decades at R0=1e-6, so Newton stops with the tip
@@ -2566,6 +2581,9 @@ class StokesTipCoalescence(Problem):
                     except Exception as diag_exc:
                         print(f"residual diagnosis unavailable: {diag_exc!r}", flush=True)
                     self._predict_now = False
+                    keep_history = (self.preserve_history_on_retry and self._history_shifted
+                                    and self._dt_prev is not None and self.n_remesh == remesh_before_attempt)
+                    self._retry_no_shift = False
                     recoverable_geometry = self._is_recoverable_geometry(exc)
                     if (recoverable_geometry
                             and self.neck_frame_moving and not quality_remesh_used
@@ -2600,6 +2618,7 @@ class StokesTipCoalescence(Problem):
                         self._thin_boost *= 2.0
                         print(f"remesh spline inversion failed; retrying remesh with thin_boost={self._thin_boost}", flush=True)
                         try:
+                            keep_history = False          # the restore below discards the history
                             self._dof_restore(snapshot)
                             self.force_remesh({self._template})
                             self._needs_tip_refine = True
@@ -2609,9 +2628,11 @@ class StokesTipCoalescence(Problem):
                         except Exception as exc2:
                             print(f"remesh retry failed: {exc2!r}", flush=True)
                     try:
-                        self._dof_restore(snapshot)
+                        self._dof_restore(snapshot, keep_history=keep_history)
                     except Exception as exc3:
                         raise RuntimeError("failed step cannot be rolled back safely") from exc3
+                    if keep_history:
+                        self._retry_no_shift = True       # history already holds x_n, x_{n-1}
                     dt *= 0.3
                 finally:
                     self._predict_now = False
@@ -2685,6 +2706,7 @@ class StokesTipCoalescence(Problem):
             "final": st,
             "n_remesh": self.n_remesh,
             "n_quality_recovery_events": self.n_quality_recovery_events,
+            "n_history_preserving_retries": self.n_history_preserving_retries,
             "wall_s": time.time() - self._wall0,
             "parameters": {
                 "R0": self.R0, "Z0": self.Z0, "n_tip": self.n_tip, "grading": self.grading,
@@ -2700,6 +2722,7 @@ class StokesTipCoalescence(Problem):
                 "capillary_steps_per_period": self.capillary_steps_per_period,
                 "capillary_period_coefficient": self.capillary_period_coefficient,
                 "capillary_step_onset": self.capillary_step_onset,
+                "preserve_history_on_retry": self.preserve_history_on_retry,
                 "newton_tolerance": self.newton_tolerance,
                 "max_residuals_cap": self.max_residuals_cap,
                 "line_search": self.line_search,
