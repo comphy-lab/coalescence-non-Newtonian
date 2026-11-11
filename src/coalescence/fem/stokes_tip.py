@@ -1133,6 +1133,9 @@ class StokesTipCoalescence(Problem):
         dt_max: float | None = None,
         dt_growth: float = 1.3,
         curvature_change_target: float = 0.05,
+        capillary_steps_per_period: float = 0.0,
+        capillary_period_coefficient: float = 4.0,
+        capillary_step_onset: float = 10.0,
         newton_tolerance: float = 1e-7,
         R_stop: float = 0.03,
         h_tip_floor: float = 1e-11,
@@ -1212,6 +1215,18 @@ class StokesTipCoalescence(Problem):
             raise ValueError("dt_max must be finite and at least dt_initial")
         self.dt_growth = float(dt_growth)
         self.curvature_change_target = float(curvature_change_target)
+        # Capillary step ceiling (off when capillary_steps_per_period is 0): once R_min >= onset*Oh,
+        # dt <= coefficient*R_min**3/(Oh*N), i.e. N steps per period of the neck-crest oscillation,
+        # whose period follows coefficient*a**3/Oh in these units.  Needs a finite Oh.
+        self.capillary_steps_per_period = float(capillary_steps_per_period)
+        self.capillary_period_coefficient = float(capillary_period_coefficient)
+        self.capillary_step_onset = float(capillary_step_onset)
+        for name in ("capillary_steps_per_period", "capillary_period_coefficient", "capillary_step_onset"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if self.capillary_steps_per_period > 0 and (Oh is None or self.capillary_period_coefficient <= 0):
+            raise ValueError("the capillary step ceiling needs a finite Oh and a positive period coefficient")
         self._last_curvature_ratio = 0.0
         self.newton_tolerance = float(newton_tolerance)
         self.R_stop = float(R_stop)
@@ -2429,11 +2444,20 @@ class StokesTipCoalescence(Problem):
         """Cap the attempted step without imposing a floor on the final remainder."""
         if self.dt_max is not None:
             dt = min(dt, self.dt_max)
+        dt = min(dt, self.capillary_dt_ceiling(st))   # every attempt, including retries after a failed step
         if self.t_stop is not None:
             dt = min(dt, self.t_stop - st["t"])
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("campaign timestep must be positive and finite")
         return dt
+
+    def capillary_dt_ceiling(self, st: dict[str, float]) -> float:
+        """N steps per neck-crest oscillation period, coefficient*R_min**3/Oh; inf when off or before onset."""
+        if self.capillary_steps_per_period <= 0 or self.Oh is None:
+            return math.inf
+        if st["R_min"] < self.capillary_step_onset * self.Oh:
+            return math.inf
+        return self.capillary_period_coefficient * st["R_min"] ** 3 / (self.Oh * self.capillary_steps_per_period)
 
     def choose_dt(self, st: dict[str, float]) -> float:
         """Step-size controller.
@@ -2445,7 +2469,7 @@ class StokesTipCoalescence(Problem):
         the meniscus the curvature criterion dominates and shortens the step.
         """
         u = max(abs(st["u_neck"]), 1e-3)
-        dt_phys = self.dt_fraction * st["R_min"] / u
+        dt_phys = min(self.dt_fraction * st["R_min"] / u, self.capillary_dt_ceiling(st))
         ratio = max(self._last_curvature_ratio, 1e-12)
         if self.curvature_reading_ignored(st):
             ratio = 1e-12          # curvature reading is noise (unresolved tip, or a clamped flat apex)
@@ -2673,6 +2697,9 @@ class StokesTipCoalescence(Problem):
                 "tip_scale_floor": self.tip_scale_floor,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
+                "capillary_steps_per_period": self.capillary_steps_per_period,
+                "capillary_period_coefficient": self.capillary_period_coefficient,
+                "capillary_step_onset": self.capillary_step_onset,
                 "newton_tolerance": self.newton_tolerance,
                 "max_residuals_cap": self.max_residuals_cap,
                 "line_search": self.line_search,

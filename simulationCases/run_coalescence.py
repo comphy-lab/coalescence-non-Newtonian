@@ -92,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--interface-grading", type=float, default=0.0, help="tip-distance grading on the interface (mapped mesh); 0 = --grading")
     ap.add_argument("--interface-size-growth", type=float, default=0.3, help="growth of the element size with mapped distance from the interface")
     ap.add_argument("--curvature-change-target", type=float, default=0.05, help="target scaled neck-curvature change per step (unit-drop curvature floor)")
+    ap.add_argument("--capillary-steps-per-period", type=float, default=0.0, help="cap dt at N steps per neck-crest oscillation period, coefficient*R_min**3/Oh (0 = off; needs finite Oh)")
+    ap.add_argument("--capillary-period-coefficient", type=float, default=4.0, help="period coefficient of the capillary step ceiling, T = coefficient*a**3/Oh")
+    ap.add_argument("--capillary-step-onset", type=float, default=10.0, help="apply the capillary step ceiling once R_min >= this multiple of Oh")
     ap.add_argument("--tip-shrink-remesh", type=float, default=0.7, help="remesh when the tip radius falls below this fraction of its value at the last remesh")
     ap.add_argument("--restart-from", type=Path, default=None, help="restart/remesh_NNNN.npz written by an earlier moving-frame run")
     ap.add_argument("--zone-grading", type=float, default=0.0, help="finer grading between --zone-inner and --zone-outer neck radii from the tip (0 = off)")
@@ -150,6 +153,9 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         curvature_step_limit=args.curvature_step_limit,
         interface_grading=args.interface_grading,
         curvature_change_target=args.curvature_change_target,
+        capillary_steps_per_period=args.capillary_steps_per_period,
+        capillary_period_coefficient=args.capillary_period_coefficient,
+        capillary_step_onset=args.capillary_step_onset,
         tip_shrink_remesh=args.tip_shrink_remesh,
         interface_size_growth=args.interface_size_growth,
         restart=restart,

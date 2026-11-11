@@ -445,6 +445,45 @@ class NewtonGateTests(unittest.TestCase):
             off._dt, off._last_curvature_ratio, off._regrow = 2.4e-5, 4.0, False
             self.assertLess(off.choose_dt({k: v for k, v in floored.items() if k != "floor_engaged"}), 2.4e-5)
 
+    def test_capillary_ceiling_caps_the_step_at_n_steps_per_crest_period(self) -> None:
+        # Oh = 3e-4, N = 100: at R_min = 0.0156 the ceiling 4*R_min**3/(Oh*N) = 2.03e-4 binds below the
+        # bridge-growth ceiling and the grown previous step; the controller then stops regrowing.
+        oh = 3e-4
+        state = {"t": 1.0, "R_min": 0.0156, "u_neck": 1.6e-2, "two_H": -400.0, "tip_radius": 1e-3,
+                 "tip_scale": 1e-3}
+        with tempfile.TemporaryDirectory() as out:
+            on = self._moving_problem(out, Oh=oh, capillary_steps_per_period=100.0)
+            on._dt, on._last_curvature_ratio, on._regrow = 1e-2, 1e-12, True
+            ceiling = 4.0 * 0.0156 ** 3 / (oh * 100.0)
+            self.assertAlmostEqual(on.capillary_dt_ceiling(state), ceiling)
+            self.assertAlmostEqual(on.choose_dt(state), ceiling)
+            self.assertFalse(on._regrow)
+            self.assertAlmostEqual(on.limit_dt_for_campaign(1.0, state), ceiling)   # caps any attempt (retries too)
+            before = dict(state, R_min=5.0 * oh)                        # below the onset 10*Oh: no ceiling
+            self.assertEqual(on.capillary_dt_ceiling(before), math.inf)
+            at_onset = dict(state, R_min=10.0 * oh)
+            self.assertAlmostEqual(on.capillary_dt_ceiling(at_onset), 4.0 * (10.0 * oh) ** 3 / (oh * 100.0))
+            twice = self._moving_problem(out, Oh=oh, capillary_steps_per_period=200.0)
+            self.assertAlmostEqual(twice.capillary_dt_ceiling(state), 0.5 * ceiling)
+
+    def test_capillary_ceiling_off_leaves_the_controller_unchanged(self) -> None:
+        oh = 3e-4
+        states = [{"t": 0.1 * k, "R_min": r, "u_neck": u, "two_H": -1e3, "tip_radius": 1e-3, "tip_scale": 1e-3}
+                  for k, (r, u) in enumerate([(3e-4, 0.4), (6e-3, 0.05), (0.0156, 1.6e-2), (0.05, 6e-3)])]
+        with tempfile.TemporaryDirectory() as out:
+            plain = self._moving_problem(out, Oh=oh)
+            off = self._moving_problem(out, Oh=oh, capillary_steps_per_period=0.0, capillary_period_coefficient=9.0)
+            for st in states:
+                for problem in (plain, off):
+                    problem._dt, problem._last_curvature_ratio, problem._regrow = 2e-3, 0.03, False
+                self.assertEqual(off.capillary_dt_ceiling(st), math.inf)
+                self.assertEqual(off.choose_dt(st), plain.choose_dt(st))
+                self.assertEqual(off.limit_dt_for_campaign(1.0, st), plain.limit_dt_for_campaign(1.0, st))
+            with self.assertRaisesRegex(ValueError, "capillary_steps_per_period"):
+                self._moving_problem(out, Oh=oh, capillary_steps_per_period=-1.0)
+            with self.assertRaisesRegex(ValueError, "finite Oh"):
+                self._moving_problem(out, capillary_steps_per_period=100.0)
+
     def test_alternating_clamped_and_trusted_readings_do_not_shrink_the_step(self) -> None:
         # gap 1e-3, cap 6, floor 0.4: radius 7e-3 is capped (scale 6e-3), 5.5e-3 is trusted.  Every accepted
         # step has an ignored endpoint, so the controller never shortens dt (12 alternating steps).
