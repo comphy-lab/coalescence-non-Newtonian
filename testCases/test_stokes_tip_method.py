@@ -647,6 +647,89 @@ class NewtonGateTests(unittest.TestCase):
         problem._summary = summary
         return problem, calls, restores
 
+    def test_remesh_history_option_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            kw = dict(R0=1e-6, Z0=5e-13, output_dir=out, tip_map_alpha=0.5, neck_frame=True, neck_frame_moving=True)
+            with self.assertRaisesRegex(ValueError, "remesh_history must be"):
+                StokesTipCoalescence(Oh=1e-4, remesh_history="bdf2", **kw)
+            with self.assertRaisesRegex(ValueError, "finite Oh and no tip bisection"):
+                StokesTipCoalescence(remesh_history="interpolated", **kw)
+            with self.assertRaisesRegex(ValueError, "finite Oh and no tip bisection"):
+                StokesTipCoalescence(Oh=1e-4, remesh_history="interpolated", tip_refine=True, **kw)
+            self.assertEqual(StokesTipCoalescence(Oh=1e-4, **kw).remesh_history, "impulsive")
+            recentring = dict(kw, neck_frame_moving=False)
+            with self.assertRaisesRegex(ValueError, "recentring neck frame"):
+                StokesTipCoalescence(Oh=1e-4, remesh_history="interpolated", **recentring)
+            lab = dict(kw, neck_frame=False, neck_frame_moving=False)
+            self.assertEqual(StokesTipCoalescence(Oh=1e-4, remesh_history="interpolated", **lab).remesh_history,
+                             "interpolated")
+
+    def _remesh_once(self, remesh_history: str):
+        """Run actions_after_remeshing on a mocked problem; return it and the impulsive-reset mock."""
+        out = tempfile.mkdtemp()
+        problem = StokesTipCoalescence(
+            R0=1e-6, Z0=5e-13, output_dir=out, Oh=1e-4, tip_map_alpha=0.5, neck_frame=True,
+            neck_frame_moving=True, remesh_history=remesh_history,
+        )
+        problem._dt_prev = 0.004
+        problem._taken_already_an_unsteady_step = True
+        problem._mesh_receipt = {"h_tip": 1e-3}
+        st = {'t': 1.0, 'R_min': 1.0, 'u_neck': 0.1, 'two_H': 1.0, 'tip_radius': 1.0, 'volume': 4.18879}
+        reset, stepper = Mock(), Mock()
+        with patch.object(Problem, "actions_after_remeshing", lambda self: None), patch.multiple(
+            problem, _snap_moving_axis=Mock(), validate_domain_geometry=Mock(), neck_state=Mock(return_value=st),
+            ndof=Mock(return_value=0), write_profile=Mock(), interface_polyline=Mock(return_value=[]),
+            assign_initial_values_impulsive=reset,
+        ), patch.object(problem, "timestepper", stepper):
+            problem.actions_after_remeshing()
+        return problem, reset, stepper
+
+    def test_remesh_keeps_the_interpolated_history_when_requested(self) -> None:
+        problem, reset, stepper = self._remesh_once("interpolated")
+        reset.assert_not_called()
+        stepper.set_num_unsteady_steps_done.assert_not_called()
+        self.assertEqual(problem._dt_prev, 0.004)
+        self.assertTrue(problem._taken_already_an_unsteady_step)
+        self.assertEqual(problem.n_remesh, 1)
+
+    def test_remesh_restarts_impulsively_by_default(self) -> None:
+        problem, reset, stepper = self._remesh_once("impulsive")
+        reset.assert_called_once_with()
+        stepper.set_num_unsteady_steps_done.assert_called_once_with(0)
+        self.assertIsNone(problem._dt_prev)
+        self.assertFalse(problem._taken_already_an_unsteady_step)
+
+    def _remesh_campaign(self, remesh_history: str):
+        """Mocked campaign whose first accepted step ends in a remesh; returns _dt_prev seen by each solve."""
+        out = tempfile.mkdtemp()
+        problem = StokesTipCoalescence(
+            R0=1e-6, Z0=5e-13, output_dir=out, Oh=1e-4, dt_initial=0.004, dt_max=0.005, R_stop=10.0,
+            tip_map_alpha=0.5, neck_frame=True, neck_frame_moving=True, remesh_history=remesh_history,
+        )
+        live = {'t': 0.0, 'R_min': 1.0, 'u_neck': 0.1, 'two_H': 1.0, 'tip_radius': 1.0, 'volume': 4.18879,
+                'h_tip_now': 0.01}
+        seen = []
+
+        def solve(*, timestep, shift_values=True, **kwargs):
+            seen.append(problem._dt_prev)
+            if len(seen) == 1:
+                problem.n_remesh += 1                    # pyoomph remeshed after this step's Newton solve
+            live['t'] += timestep
+
+        with patch.multiple(
+            problem, is_initialised=Mock(return_value=True), refine_tip=Mock(),
+            neck_state=Mock(side_effect=lambda: live.copy()), write_row=Mock(), write_profile=Mock(),
+            interface_polyline=Mock(return_value=[]), ndof=Mock(return_value=0),
+            choose_dt=Mock(return_value=0.004), _dof_snapshot=Mock(return_value={}),
+            solve=Mock(side_effect=solve), write_snapshot=Mock(), _discard_trial_observations=Mock(),
+        ):
+            problem.run_campaign(max_steps=3)
+        return seen
+
+    def test_campaign_keeps_the_step_history_across_an_interpolated_remesh(self) -> None:
+        self.assertEqual(self._remesh_campaign("interpolated"), [None, 0.004, 0.004])
+        self.assertEqual(self._remesh_campaign("impulsive"), [None, None, 0.004])
+
     def test_failed_step_keeps_the_bdf_history_when_requested(self) -> None:
         problem, calls, restores = self._retry_campaign(preserve=True)
         self.assertEqual(restores, [True])                        # restored without an impulsive reset

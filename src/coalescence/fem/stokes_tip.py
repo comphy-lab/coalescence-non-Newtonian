@@ -1137,6 +1137,7 @@ class StokesTipCoalescence(Problem):
         capillary_period_coefficient: float = 4.0,
         capillary_step_onset: float = 10.0,
         preserve_history_on_retry: bool = False,
+        remesh_history: str = "impulsive",
         newton_tolerance: float = 1e-7,
         R_stop: float = 0.03,
         h_tip_floor: float = 1e-11,
@@ -1235,6 +1236,19 @@ class StokesTipCoalescence(Problem):
         self._history_shifted = False
         self._retry_no_shift = False
         self.n_history_preserving_retries = 0
+        # Time history after a remesh.  "impulsive" (default) restarts the integrator from the new
+        # geometry with one first-order step.  "interpolated" keeps the history levels that the
+        # mesh-to-mesh interpolation carries onto the new mesh (fields and positions), so BDF2
+        # continues across the remesh; it is for inertial cases without oomph-lib tip bisection.
+        # The recentring neck frame (neck_frame without neck_frame_moving) translates only the
+        # current positions at a remesh, which would leave the position history in the old frame.
+        if remesh_history not in ("impulsive", "interpolated"):
+            raise ValueError("remesh_history must be 'impulsive' or 'interpolated'")
+        if remesh_history == "interpolated" and (Oh is None or tip_refine):
+            raise ValueError("interpolated remesh history needs a finite Oh and no tip bisection")
+        if remesh_history == "interpolated" and neck_frame and not neck_frame_moving:
+            raise ValueError("interpolated remesh history is not available in the recentring neck frame")
+        self.remesh_history = remesh_history
         self._last_curvature_ratio = 0.0
         self.newton_tolerance = float(newton_tolerance)
         self.R_stop = float(R_stop)
@@ -2349,14 +2363,15 @@ class StokesTipCoalescence(Problem):
         self._snap_moving_axis()
         self.validate_domain_geometry()
         self._jacobian_ratio_at_remesh = self.min_jacobian_ratio
-        # Stokes carries no velocity history, and the interpolated position history of a
-        # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
-        # mesh velocity.  Restart the time integrator impulsively from the new geometry
-        # (one first-order step) instead of trusting the interpolated history.
-        self.assign_initial_values_impulsive()
-        self.timestepper.set_num_unsteady_steps_done(0)
-        self._taken_already_an_unsteady_step = False
-        self._dt_prev = None
+        if self.remesh_history != "interpolated":
+            # Stokes carries no velocity history, and the interpolated position history of a
+            # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
+            # mesh velocity.  Restart the time integrator impulsively from the new geometry
+            # (one first-order step) instead of trusting the interpolated history.
+            self.assign_initial_values_impulsive()
+            self.timestepper.set_num_unsteady_steps_done(0)
+            self._taken_already_an_unsteady_step = False
+            self._dt_prev = None
         self._step_at_remesh = self._steps
         self._needs_tip_refine = True
         self._fresh_mesh = True
@@ -2646,7 +2661,8 @@ class StokesTipCoalescence(Problem):
                 break
             if fresh_at_start and self.n_remesh == remesh_before_step:
                 self._fresh_mesh = False
-            self._dt_prev = None if self.n_remesh != remesh_before_step else dt
+            keeps_history = self.n_remesh == remesh_before_step or self.remesh_history == "interpolated"
+            self._dt_prev = dt if keeps_history else None
             self._dt = dt
             self._steps += 1
             st_prev = st
@@ -2723,6 +2739,7 @@ class StokesTipCoalescence(Problem):
                 "capillary_period_coefficient": self.capillary_period_coefficient,
                 "capillary_step_onset": self.capillary_step_onset,
                 "preserve_history_on_retry": self.preserve_history_on_retry,
+                "remesh_history": self.remesh_history,
                 "newton_tolerance": self.newton_tolerance,
                 "max_residuals_cap": self.max_residuals_cap,
                 "line_search": self.line_search,
