@@ -361,15 +361,20 @@ def point_distance_expression(cx: float, cy: float) -> str:
     return f"sqrt((x-({cx!r}))^2+(y-({cy!r}))^2)"
 
 
-def capped_tip_scale(rho: float, gap: float, cap: float, floor: float = 0.0) -> float:
+def capped_tip_scale(rho: float, gap: float, cap: float, floor: float = 0.0, gap_only: bool = False) -> float:
     """Tip length scale for meshing and remesh triggers: rho, at most cap gap half-heights.
 
     cap = 0 is off.  Past the inertial bulb transition the plane-node circle fit of a
     blunt apex can read radii far beyond the gap that bounds the meniscus.  floor (a
     fraction of the cap, 0 = off) bounds the scale from below at floor * cap gap
-    half-heights.
+    half-heights.  gap_only (with the floor on) sets the scale to cap gap half-heights
+    whatever the fitted radius: on an apex that oscillates on the gap scale the fit can
+    alternate between readings near the floor and near the cap, and a scale taken from the
+    gap alone is continuous between meshes.
     """
     if cap > 0.0 and math.isfinite(gap) and gap > 0.0:
+        if gap_only and floor > 0.0:
+            return cap * gap
         return max(min(rho, cap * gap), floor * cap * gap)
     return rho
 
@@ -1190,6 +1195,7 @@ class StokesTipCoalescence(Problem):
         tip_fit_support: float = 0.0,
         tip_gap_cap: float = 0.0,
         tip_scale_floor: float = 0.0,
+        tip_scale_gap_only: bool = False,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1392,6 +1398,16 @@ class StokesTipCoalescence(Problem):
             raise ValueError("tip_scale_floor must lie in [0, 1)")
         if self.tip_scale_floor > 0.0 and self.tip_gap_cap <= 0.0:
             raise ValueError("tip_scale_floor requires tip_gap_cap")
+        # tip_scale_gap_only: once the floor is engaged, the tip scale is tip_gap_cap gap
+        # half-heights whatever the fitted radius (the fit is still recorded).  A state so sized
+        # counts as clamped: its curvature does not steer the step and a recovery remesh is judged
+        # on the gap half-height.  Inert until the floor engages (default off).  oomph-lib tip
+        # bisection sizes the tip from the fitted radius, so the two are not combined.
+        self.tip_scale_gap_only = bool(tip_scale_gap_only)
+        if self.tip_scale_gap_only and self.tip_scale_floor <= 0.0:
+            raise ValueError("tip_scale_gap_only requires tip_scale_floor")
+        if self.tip_scale_gap_only and self.tip_refine:
+            raise ValueError("tip_scale_gap_only is not available with tip bisection")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -1866,7 +1882,7 @@ class StokesTipCoalescence(Problem):
         if self.tip_gap_cap > 0.0:
             gap = gap_half_height(self.interface_polyline(), 1.05 * rmin - self._frame_shift_now())
             floor = self.tip_scale_floor if self.cap_engaged else 0.0
-            tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap, floor)
+            tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap, floor, self.tip_scale_gap_only)
             extra["gap_half_height"] = gap
             if floor > 0.0:
                 extra["floor_engaged"] = 1.0
@@ -2732,7 +2748,7 @@ class StokesTipCoalescence(Problem):
                 "quality_remesh_ratio": self.quality_remesh_ratio,
                 "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
                 "tip_fit_support": self.tip_fit_support, "tip_gap_cap": self.tip_gap_cap,
-                "tip_scale_floor": self.tip_scale_floor,
+                "tip_scale_floor": self.tip_scale_floor, "tip_scale_gap_only": self.tip_scale_gap_only,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "capillary_steps_per_period": self.capillary_steps_per_period,

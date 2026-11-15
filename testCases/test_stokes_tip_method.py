@@ -217,6 +217,43 @@ class NewtonGateTests(unittest.TestCase):
         hi_f, lo_f = capped_tip_scale(flat, gap, cap, 0.4), capped_tip_scale(turn, gap, cap, 0.4)
         self.assertLess(hi_f / lo_f, grow)          # the flat reading no longer triggers a coarser remesh
 
+    def test_gap_only_scale_is_the_cap_once_the_floor_is_on(self) -> None:
+        gap, cap = 0.2, 6.0
+        for rho in (1e-3, 0.05, 0.6, 1.2, 5.0, math.inf):
+            self.assertAlmostEqual(capped_tip_scale(rho, gap, cap, 0.4, True), 1.2)   # any fitted radius
+        self.assertEqual(capped_tip_scale(0.05, gap, cap, 0.0, True), 0.05)          # floor off: unchanged
+        self.assertAlmostEqual(capped_tip_scale(5.0, gap, cap, 0.0, True), 1.2)      # floor off: plain cap
+        self.assertEqual(capped_tip_scale(0.05, gap, 0.0, 0.4, True), 0.05)          # cap off: unchanged
+        self.assertEqual(capped_tip_scale(0.05, math.inf, cap, 0.4, True), 0.05)     # no gap: unchanged
+
+    def test_gap_only_scale_breaks_the_floor_cap_remesh_cycle(self) -> None:
+        # An apex oscillating on the gap scale, G = 1.4e-5: successive meshes read radii from below the
+        # floor to beyond the cap.  With the floor the scale jumps between floor and cap (ratio 0.4,
+        # below the shrink trigger 0.7); taken from the gap alone it does not change.
+        gap, cap, floor, shrink = 1.4e-5, 6.0, 0.4, 0.7
+        readings = (6.4e-6, 1.4e-4, 3.5e-5, 7.5e-5)
+        floored = [capped_tip_scale(r, gap, cap, floor) for r in readings]
+        self.assertLess(min(floored) / max(floored), shrink)
+        only = [capped_tip_scale(r, gap, cap, floor, True) for r in readings]
+        self.assertEqual(len(set(only)), 1)
+        self.assertAlmostEqual(only[0], cap * gap)
+
+    def test_gap_only_states_are_clamped_for_step_control_and_recovery(self) -> None:
+        # Two meshes of one geometry read unclamped radii 7.5e-5 and 3.5e-5 between the floor and the cap
+        # (ratio 0.47) with opposite curvature signs.  With the floor alone the recovery check compares
+        # the radii and refuses; sized by the gap, both states are clamped and the check uses G.
+        gap, cap, floor = 1.4e-5, 6.0, 0.4
+        base = {"t": 0.0614, "R_min": 4.22e-3, "volume": 4.1888, "gap_half_height": gap, "floor_engaged": 1.0}
+        def state(rho, kappa, gap_only):
+            return dict(base, tip_radius=rho, kappa_m=kappa, tip_scale=capped_tip_scale(rho, gap, cap, floor, gap_only))
+        with self.assertRaisesRegex(RuntimeError, "tip radius"):
+            StokesTipCoalescence.verify_recovery_remesh(state(7.5e-5, 1 / 7.5e-5, False), state(3.5e-5, -1 / 3.5e-5, False))
+        StokesTipCoalescence.verify_recovery_remesh(state(7.5e-5, 1 / 7.5e-5, True), state(3.5e-5, -1 / 3.5e-5, True))
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, tip_gap_cap=cap, tip_scale_floor=floor, tip_scale_gap_only=True)
+            self.assertTrue(problem.curvature_reading_ignored(state(3.5e-5, -1 / 3.5e-5, True)))
+            self.assertFalse(problem.curvature_reading_ignored(state(3.5e-5, -1 / 3.5e-5, False)))
+
     def test_tip_scale_floor_engages_only_after_an_accepted_capped_state(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             problem = self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4)
@@ -1129,6 +1166,11 @@ class NewtonGateTests(unittest.TestCase):
                         {"tip_scale_floor": float("nan"), "tip_gap_cap": 6.0}, {"tip_scale_floor": 0.4}):
                 with self.assertRaises(ValueError):
                     self._moving_problem(out, **bad)
+            self.assertFalse(problem.tip_scale_gap_only)
+            with self.assertRaises(ValueError):
+                self._moving_problem(out, tip_gap_cap=6.0, tip_scale_gap_only=True)       # needs the floor
+            with self.assertRaises(ValueError):                                             # not with bisection
+                self._moving_problem(out, tip_gap_cap=6.0, tip_scale_floor=0.4, tip_scale_gap_only=True, tip_refine=True)
 
     def test_shallow_off_neck_trough_requests_refinement_without_moving_interface(self) -> None:
         poly = [(0.0, 1e-3), (0.5, 1.2e-3), (1.0, 1e-2)]
