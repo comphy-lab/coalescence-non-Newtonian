@@ -14,7 +14,8 @@ from scipy.sparse import csr_matrix
 from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
     StokesTipCoalescence, capped_tip_scale, crest_interface_refinement_points, fit_circle_kasa, gap_half_height,
-    point_distance_expression, shallow_interface_refinement_points, tip_fit_indices, validate_upper_interface,
+    point_distance_expression, predictor_allowed, quality_lookahead_ratio, shallow_interface_refinement_points,
+    tip_fit_indices, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
@@ -863,6 +864,93 @@ class NewtonGateTests(unittest.TestCase):
             for bad in (-0.1, 1.0, float("nan")):
                 with self.assertRaises(ValueError):
                     self._moving_problem(out, quality_remesh_ratio=bad)
+
+    def test_predictor_holdoff_counts_accepted_steps_on_the_mesh(self) -> None:
+        self.assertTrue(predictor_allowed(0, 0))            # off: the predictor is always used
+        self.assertFalse(predictor_allowed(0, 2))           # first step on a new mesh
+        self.assertFalse(predictor_allowed(1, 2))           # second step
+        self.assertTrue(predictor_allowed(2, 2))            # two accepted steps carried: predictor again
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out)
+            self.assertEqual(problem.predictor_holdoff, 0)
+            self.assertEqual(problem._solves_on_mesh, 0)
+            self.assertEqual(problem.n_predictor_holdoff_attempts, 0)
+            self.assertEqual(self._moving_problem(out, predictor_holdoff=2).predictor_holdoff, 2)
+            for bad in (-1, 1.5, True):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, predictor_holdoff=bad)
+
+    def test_quality_lookahead_extrapolates_the_last_accepted_change(self) -> None:
+        self.assertAlmostEqual(quality_lookahead_ratio(0.34, 0.55), 0.13)
+        self.assertEqual(quality_lookahead_ratio(0.40, 0.40), math.inf)      # not falling
+        self.assertEqual(quality_lookahead_ratio(0.50, 0.40), math.inf)      # improving
+        self.assertEqual(quality_lookahead_ratio(0.34, float("nan")), math.inf)
+        self.assertEqual(quality_lookahead_ratio(float("nan"), 0.55), math.inf)
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(self._moving_problem(out).quality_lookahead_floor, 0.0)
+            for bad in ({"quality_lookahead_floor": 0.15},                                     # needs the quality trigger
+                        {"quality_lookahead_floor": 0.3, "quality_remesh_ratio": 0.3},          # must lie below it
+                        {"quality_lookahead_floor": -0.1, "quality_remesh_ratio": 0.3},
+                        {"quality_lookahead_floor": float("nan"), "quality_remesh_ratio": 0.3}):
+                with self.assertRaises(ValueError):
+                    self._moving_problem(out, **bad)
+            problem = self._moving_problem(out, quality_remesh_ratio=0.3, quality_lookahead_floor=0.15)
+            problem._jacobian_ratio_at_remesh = 0.58
+            problem.min_jacobian_ratio, problem._jacobian_ratio_prev = 0.34, 0.55      # falls 0.21 a step: 0.13 next
+            self.assertTrue(problem._quality_remesh_reason().startswith("element quality lookahead"))
+            problem.min_jacobian_ratio, problem._jacobian_ratio_prev = 0.45, 0.55      # falls 0.10 a step: 0.35 next
+            self.assertIsNone(problem._quality_remesh_reason())
+            problem.min_jacobian_ratio, problem._jacobian_ratio_prev = 0.25, 0.55      # the threshold itself
+            self.assertTrue(problem._quality_remesh_reason().startswith("element quality: "))
+            problem.min_jacobian_ratio, problem._jacobian_ratio_prev = 0.34, float("nan")   # no accepted reading yet
+            self.assertIsNone(problem._quality_remesh_reason())
+            problem._jacobian_ratio_at_remesh = 0.25                                        # mesh born below the threshold
+            problem.min_jacobian_ratio, problem._jacobian_ratio_prev = 0.20, 0.25
+            self.assertIsNone(problem._quality_remesh_reason())
+            off = self._moving_problem(out, quality_remesh_ratio=0.3)
+            off._jacobian_ratio_at_remesh = 0.58
+            off.min_jacobian_ratio, off._jacobian_ratio_prev = 0.34, 0.55
+            self.assertIsNone(off._quality_remesh_reason())
+
+    def test_accepted_retry_after_a_recovery_remesh_updates_the_per_mesh_history(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, quality_remesh_ratio=0.3, quality_lookahead_floor=0.15, predictor_holdoff=2)
+            self.assertEqual(problem._solve_generation, problem.n_remesh)
+            # A step starts on mesh generation 5.  A rejected trial is recovered by a remesh, by the
+            # campaign loop or by pyoomph inside the same solve() call; the remesh resets the
+            # per-mesh history as actions_after_remeshing does, and the Newton solve of the retry
+            # starts on generation 6 (actions_before_newton_solve records it) and is accepted.
+            problem.n_remesh = 6
+            problem._jacobian_ratio_at_remesh = problem._jacobian_ratio_prev = 0.40
+            problem._solves_on_mesh = 0
+            problem._solve_generation = 6
+            problem.min_jacobian_ratio = 0.55                      # the accepted retry on the new mesh
+            problem._note_accepted_solve()
+            self.assertEqual(problem._solves_on_mesh, 1)
+            self.assertEqual(problem._jacobian_ratio_prev, 0.55)
+            self.assertFalse(predictor_allowed(problem._solves_on_mesh, problem.predictor_holdoff))
+            # Next step: 0.55 -> 0.34 extrapolates to 0.13 (from the stale 0.40 it would read 0.28 and miss).
+            problem.min_jacobian_ratio = 0.34
+            self.assertTrue(problem._quality_remesh_reason().startswith("element quality lookahead"))
+            problem._note_accepted_solve()
+            self.assertTrue(predictor_allowed(problem._solves_on_mesh, problem.predictor_holdoff))
+            # An accepted solve that itself ends in a remesh leaves the reset of that remesh in place:
+            # the solve started on generation 6 and the mesh is now generation 7.
+            problem.n_remesh = 7
+            problem._jacobian_ratio_at_remesh = problem._jacobian_ratio_prev = 0.58
+            problem._solves_on_mesh = 0
+            problem._note_accepted_solve()
+            self.assertEqual(problem._solves_on_mesh, 0)
+            self.assertEqual(problem._jacobian_ratio_prev, 0.58)
+
+    def test_every_newton_solve_records_the_mesh_generation_it_starts_on(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = self._moving_problem(out, predictor_holdoff=2)
+            problem.n_remesh = 9                                   # e.g. pyoomph remeshed inside solve() and retries
+            problem._solve_generation = 8
+            with patch.object(Problem, "actions_before_newton_solve", lambda self: None):
+                problem.actions_before_newton_solve()
+            self.assertEqual(problem._solve_generation, 9)
 
     def test_signed_jacobian_is_recoverable_only_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as out:

@@ -361,6 +361,26 @@ def point_distance_expression(cx: float, cy: float) -> str:
     return f"sqrt((x-({cx!r}))^2+(y-({cy!r}))^2)"
 
 
+def predictor_allowed(solves_on_mesh: int, holdoff: int) -> bool:
+    """Whether the linear predictor may supply the first Newton iterate.
+
+    The predictor extrapolates the two history levels.  A remesh breaks their smoothness: the
+    first step on a new mesh contains the re-equilibration of the interpolated state, and
+    extrapolating it gave iterates from which Newton diverged on the first or second step after
+    most remeshes of the oscillating low-Oh front.  holdoff is the number of accepted steps a
+    mesh must have carried before the predictor is used on it again (0 = always).
+    """
+    return solves_on_mesh >= holdoff
+
+
+def quality_lookahead_ratio(ratio: float, previous: float) -> float:
+    """Worst-element Jacobian ratio one step ahead, by linear extrapolation of its last accepted
+    change; inf when it is not falling or either reading is missing."""
+    if not (math.isfinite(ratio) and math.isfinite(previous)) or previous <= ratio:
+        return math.inf
+    return 2.0 * ratio - previous
+
+
 def capped_tip_scale(rho: float, gap: float, cap: float, floor: float = 0.0, gap_only: bool = False) -> float:
     """Tip length scale for meshing and remesh triggers: rho, at most cap gap half-heights.
 
@@ -1196,6 +1216,8 @@ class StokesTipCoalescence(Problem):
         tip_gap_cap: float = 0.0,
         tip_scale_floor: float = 0.0,
         tip_scale_gap_only: bool = False,
+        predictor_holdoff: int = 0,
+        quality_lookahead_floor: float = 0.0,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1408,6 +1430,22 @@ class StokesTipCoalescence(Problem):
             raise ValueError("tip_scale_gap_only requires tip_scale_floor")
         if self.tip_scale_gap_only and self.tip_refine:
             raise ValueError("tip_scale_gap_only is not available with tip bisection")
+        # predictor_holdoff: accepted steps a mesh must have carried before the linear predictor
+        # supplies the first Newton iterate on it (see predictor_allowed).  The converged step is
+        # the same to the Newton tolerance; only the starting iterate changes.  0 (default) keeps
+        # the predictor on every step.
+        if isinstance(predictor_holdoff, bool) or int(predictor_holdoff) != predictor_holdoff or predictor_holdoff < 0:
+            raise ValueError("predictor_holdoff must be a non-negative integer")
+        self.predictor_holdoff = int(predictor_holdoff)
+        # quality_lookahead_floor: remesh already when the worst element's Jacobian ratio,
+        # extrapolated one step ahead from its last accepted change, would fall below this value,
+        # so that a mesh which degrades quickly is replaced before a trial step folds an element.
+        # 0 (default) = off; it supplements quality_remesh_ratio and must lie below it.
+        self.quality_lookahead_floor = float(quality_lookahead_floor)
+        if not (math.isfinite(self.quality_lookahead_floor) and self.quality_lookahead_floor >= 0.0):
+            raise ValueError("quality_lookahead_floor must be non-negative")
+        if self.quality_lookahead_floor > 0.0 and not self.quality_remesh_ratio > self.quality_lookahead_floor:
+            raise ValueError("quality_lookahead_floor requires a larger quality_remesh_ratio")
         # Restart from a saved remesh state (write_restart_state): the interface polyline in frame
         # coordinates just before that remesh, and the driver scalars at that moment.  In the
         # Stokes limit the interface is the complete physical state.
@@ -1462,6 +1500,16 @@ class StokesTipCoalescence(Problem):
         # True from a remesh (or a restart, whose first mesh is a remesh) until the first
         # accepted step on that mesh.
         self._fresh_mesh = self._restart is not None
+        # Accepted steps solved on the current mesh, and the worst-element Jacobian ratio of the
+        # last accepted state on it (the fresh-mesh ratio until a step has been accepted).
+        self._solves_on_mesh = 0
+        self._jacobian_ratio_prev = float("nan")
+        # Mesh generation on which the latest Newton solve started (set in
+        # actions_before_newton_solve, so that it also follows a remesh-and-retry made inside one
+        # solve() call by pyoomph's inversion handling).
+        self._solve_generation = self.n_remesh
+        self.n_predictor_holdoff_attempts = 0
+        self.n_quality_lookahead_remeshes = 0
         self._wall0 = time.time()
 
     # ------------------------------------------------------------------ mesh
@@ -2199,14 +2247,18 @@ class StokesTipCoalescence(Problem):
             if U.size > int(index.max()):
                 U[index] = values
                 self.set_current_dofs(U)
+        self._solve_generation = self.n_remesh
         if self._predict_now and self._dt_prev is not None and self._dt_prev > 0:
-            try:
-                x1 = numpy.asarray(self.get_history_dofs(1), dtype=float)
-                x2 = numpy.asarray(self.get_history_dofs(2), dtype=float)
-                if x1.shape == x2.shape and x1.size > 0:
-                    self.set_current_dofs(x1 + (self._dt / self._dt_prev) * (x1 - x2))
-            except Exception as exc:  # never let the predictor kill a step
-                print(f"predictor skipped: {exc!r}", flush=True)
+            if not predictor_allowed(self._solves_on_mesh, self.predictor_holdoff):
+                self.n_predictor_holdoff_attempts += 1     # Newton starts from the last state
+            else:
+                try:
+                    x1 = numpy.asarray(self.get_history_dofs(1), dtype=float)
+                    x2 = numpy.asarray(self.get_history_dofs(2), dtype=float)
+                    if x1.shape == x2.shape and x1.size > 0:
+                        self.set_current_dofs(x1 + (self._dt / self._dt_prev) * (x1 - x2))
+                except Exception as exc:  # never let the predictor kill a step
+                    print(f"predictor skipped: {exc!r}", flush=True)
         super().actions_before_newton_solve()
 
     def actions_before_newton_step(self):
@@ -2284,6 +2336,21 @@ class StokesTipCoalescence(Problem):
                 and not math.isfinite(self._jacobian_ratio_at_remesh)):
             self.validate_domain_geometry()
             self._jacobian_ratio_at_remesh = self.min_jacobian_ratio
+            self._jacobian_ratio_prev = self.min_jacobian_ratio
+
+    def _note_accepted_solve(self) -> None:
+        """Per-mesh bookkeeping after an accepted step.
+
+        _solve_generation is the mesh generation on which the Newton solve that was accepted
+        started.  It is later than the generation at the start of the step when a recovery
+        remesh preceded the retry, whether the campaign loop made it or pyoomph did inside one
+        solve() call.  If the accepted solve did not itself end in a remesh, the mesh has carried
+        one more accepted step and its worst-element ratio is the reference for the look-ahead; a
+        remesh after the solve has already reset both (actions_after_remeshing).
+        """
+        if self.n_remesh == self._solve_generation:
+            self._solves_on_mesh += 1
+            self._jacobian_ratio_prev = self.min_jacobian_ratio
 
     def _quality_remesh_reason(self) -> str | None:
         """Element-quality trigger: the worst element folded towards zero since the remesh."""
@@ -2294,6 +2361,11 @@ class StokesTipCoalescence(Problem):
             return None
         if ratio < self.quality_remesh_ratio <= fresh:
             return f"element quality: min Jacobian ratio {ratio:.3g} < {self.quality_remesh_ratio:.3g} (fresh mesh {fresh:.3g})"
+        if self.quality_lookahead_floor > 0.0 and self.quality_remesh_ratio <= fresh:
+            ahead = quality_lookahead_ratio(ratio, self._jacobian_ratio_prev)
+            if ahead < self.quality_lookahead_floor:
+                return (f"element quality lookahead: min Jacobian ratio {ratio:.3g} (last accepted "
+                        f"{self._jacobian_ratio_prev:.3g}) extrapolates to {ahead:.3g} < {self.quality_lookahead_floor:.3g}")
         return None
 
     def _remesh_reason(self) -> str | None:
@@ -2379,6 +2451,10 @@ class StokesTipCoalescence(Problem):
         self._snap_moving_axis()
         self.validate_domain_geometry()
         self._jacobian_ratio_at_remesh = self.min_jacobian_ratio
+        self._jacobian_ratio_prev = self.min_jacobian_ratio
+        self._solves_on_mesh = 0
+        if str(self._pending_remesh_reason).startswith("element quality lookahead"):
+            self.n_quality_lookahead_remeshes += 1
         if self.remesh_history != "interpolated":
             # Stokes carries no velocity history, and the interpolated position history of a
             # refined tip is accurate only to the OLD element scale, which corrupts the BDF2
@@ -2677,6 +2753,7 @@ class StokesTipCoalescence(Problem):
                 break
             if fresh_at_start and self.n_remesh == remesh_before_step:
                 self._fresh_mesh = False
+            self._note_accepted_solve()
             keeps_history = self.n_remesh == remesh_before_step or self.remesh_history == "interpolated"
             self._dt_prev = dt if keeps_history else None
             self._dt = dt
@@ -2739,6 +2816,8 @@ class StokesTipCoalescence(Problem):
             "n_remesh": self.n_remesh,
             "n_quality_recovery_events": self.n_quality_recovery_events,
             "n_history_preserving_retries": self.n_history_preserving_retries,
+            "n_predictor_holdoff_attempts": self.n_predictor_holdoff_attempts,
+            "n_quality_lookahead_remeshes": self.n_quality_lookahead_remeshes,
             "wall_s": time.time() - self._wall0,
             "parameters": {
                 "R0": self.R0, "Z0": self.Z0, "n_tip": self.n_tip, "grading": self.grading,
@@ -2749,6 +2828,7 @@ class StokesTipCoalescence(Problem):
                 "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
                 "tip_fit_support": self.tip_fit_support, "tip_gap_cap": self.tip_gap_cap,
                 "tip_scale_floor": self.tip_scale_floor, "tip_scale_gap_only": self.tip_scale_gap_only,
+                "predictor_holdoff": self.predictor_holdoff, "quality_lookahead_floor": self.quality_lookahead_floor,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,
                 "dt_growth": self.dt_growth, "curvature_change_target": self.curvature_change_target,
                 "capillary_steps_per_period": self.capillary_steps_per_period,
