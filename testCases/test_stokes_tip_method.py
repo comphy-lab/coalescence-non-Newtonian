@@ -15,13 +15,157 @@ from coalescence.fem.stokes_tip import (
     HiddenInterfacePlaneCrossing, InvalidMovingFrameGeometry, MappedTipMesh,
     StokesTipCoalescence, capped_tip_scale, crest_interface_refinement_points, fit_circle_kasa, gap_half_height,
     point_distance_expression, predictor_allowed, quality_lookahead_ratio, shallow_interface_refinement_points,
-    tip_fit_indices, validate_upper_interface,
+    symmetric_tip_curvature, tip_fit_indices, validate_upper_interface,
 )
 from coalescence.fem.q2_geometry import signed_jacobian_range
 from coalescence.fem.stokes_block_audit import _json_safe, _solve_serial_block
 
 
 class TipMapTests(unittest.TestCase):
+    def test_gap_fit_recovers_signed_circles_and_flat_neck(self) -> None:
+        import numpy as np
+        for radius in (5e-13, 0.01, 2.0):
+            for sign in (-1, 1):
+                for grading in (1.0, 1.7):
+                    angle = 0.6 * np.linspace(0, 1, 25)**grading
+                    poly = np.column_stack((sign * 2 * radius * np.sin(angle/2)**2, radius*np.sin(angle)))
+                    k = symmetric_tip_curvature(poly, 0.25 * radius, 0.05 * radius)
+                    self.assertAlmostEqual(k * radius, -sign, delta=4e-6)
+        self.assertEqual(symmetric_tip_curvature([(2, 0), (2, .2), (2, .6)], .25), 0)
+
+    def test_gap_fit_is_invariant_under_subdivision_of_a_nonuniform_q2_edge(self) -> None:
+        def curve(t):
+            return (0.3*t*t, 0.8*t + 0.2*t*t)
+        one = [curve(t) for t in (0, 0.5, 1)]
+        split = [curve(t) for t in (0, 0.065, 0.13, 0.38, 0.63, 0.815, 1)]
+        reference = symmetric_tip_curvature(one, .55, .04)
+        self.assertAlmostEqual(symmetric_tip_curvature(split, .55, .04), reference, places=13)
+        # The quadratic turns below the requested height, then a distant
+        # edge rises above it. That other branch must not enter the fit.
+        with self.assertRaisesRegex(ValueError, "ascending tip"):
+            symmetric_tip_curvature([(0, 0), (.1, .2), (.2, .1), (.3, .6), (.4, 1)], .4)
+        # A purely linear trailing edge follows the same fit convention.
+        self.assertAlmostEqual(symmetric_tip_curvature([(0, 0), (.2, 1)], .5),
+                               symmetric_tip_curvature([(0, 0), (.1, .5), (.2, 1)], .5))
+
+    def test_gap_fit_enters_after_cap_engagement_and_freezes_height_for_newton(self) -> None:
+        import numpy as np
+        z = np.linspace(0, .8, 65)
+        r = 0.2*z*z + .5*z**4
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(R0=0.1, Z0=0.005, output_dir=out, tip_gap_cap=6,
+                                           tip_scale_floor=.4, tip_fit_gap_fraction=.25)
+            mesh = Mock()
+            mesh.evaluate_observable.return_value = 1.0
+            poly = list(zip(r, z))
+            with (patch.object(problem, "_interface_nodes", return_value=(None, r, z, np.zeros_like(z), np.zeros_like(z))),
+                  patch.object(problem, "_frame_shift_now", return_value=1.0),
+                  patch.object(problem, "interface_polyline", return_value=poly),
+                  patch.object(problem, "get_mesh", return_value=mesh),
+                  patch.object(problem, "get_current_time", return_value=0.0)):
+                old = problem.neck_state()
+                self.assertNotIn("tip_fit_height", old)
+                problem.cap_engaged = True
+                first = problem.neck_state()
+                self.assertEqual(first["tip_fit_height"], .25 * first["gap_half_height"])
+                problem._step_tip_fit_support = problem._last_tip_fit_support
+                problem.tip_radius_lagged *= 100
+                same = problem.neck_state()
+                self.assertEqual(same["two_H"], first["two_H"])
+                self.assertEqual(same["tip_scale"], first["tip_scale"])
+                r[24:] *= 1.2
+                poly[:] = list(zip(r, z))
+                frozen = problem.neck_state()
+                self.assertEqual(frozen["tip_fit_height"], first["tip_fit_height"])
+                problem.n_remesh += 1
+                renewed = problem.neck_state()
+                self.assertEqual(renewed["tip_fit_height"], .25 * renewed["gap_half_height"])
+                self.assertNotEqual(renewed["tip_fit_height"], frozen["tip_fit_height"])
+
+    def test_flat_gap_fit_preserves_recovery_geometry_guards(self) -> None:
+        state = dict(t=0.2, R_min=0.1, volume=1.0, tip_radius=math.inf, kappa_m=0.0, tip_scale=.006,
+                     gap_half_height=.001, floor_engaged=1.0, tip_fit_height=.00025)
+        StokesTipCoalescence.verify_recovery_remesh(state, state)
+        with self.assertRaisesRegex(RuntimeError, "gap"):
+            StokesTipCoalescence.verify_recovery_remesh(state, dict(state, gap_half_height=.0001))
+        with self.assertRaisesRegex(RuntimeError, "invalid"):
+            StokesTipCoalescence.verify_recovery_remesh(state, dict(state, kappa_m=math.nan))
+
+    def test_gap_apex_reconstruction_matches_first_engagement_and_its_restart(self) -> None:
+        import itertools
+        import numpy as np
+        y = np.linspace(0, 1, 257)
+        poly = list(zip(0.4 * y**2, y))
+        poly[-1] = (-1., 1.)
+        with tempfile.TemporaryDirectory() as out:
+            pb = StokesTipCoalescence(R0=0.1, Z0=.005, output_dir=out, tip_map_alpha=.5,
+                                      neck_frame=True, neck_frame_moving=True, h_max=.2, tip_gap_cap=6,
+                                      tip_scale_floor=.4, tip_fit_gap_fraction=.25)
+            pb.frame_shift_phys = 1.
+            arcs = []
+            for restarting, lagged in ((False, 2.), (True, 2.), (True, .7)):
+                pb.restart_poly = poly.copy() if restarting else None
+                pb.cap_engaged = restarting
+                pb._pending_cap_observation = not restarting
+                pb.tip_radius_lagged = lagged
+                mesh = MappedTipMesh()
+                def ends(pieces, scale, size_at, **kwargs):
+                    return [mesh._fwd(*(x / scale for x in pieces[i](t))) for i, t in ((0, 0), (-1, 1))]
+                with (patch.object(pb, "interface_polyline", side_effect=poly.copy),
+                      patch.multiple(mesh, get_problem=Mock(return_value=pb), is_first_time=Mock(return_value=restarting),
+                          _control_points=Mock(side_effect=ends), set_gmsh_parameter=Mock(),
+                          point=Mock(side_effect=itertools.count()), spline=Mock(), line=Mock(),
+                          plane_surface=Mock(), add_mesh_size_field=Mock(side_effect=itertools.count()),
+                          set_mesh_size_background_field=Mock())):
+                    mesh.define_geometry()
+                arc = pb._apex_arc
+                self.assertAlmostEqual(arc["z_apex"], .05 * gap_half_height(poly, 1.05 - 1.))
+                self.assertGreater(arc["nodes_replaced"], 0)
+                arcs.append(dict(arc))
+            self.assertEqual(arcs[0], arcs[1])
+            self.assertEqual(arcs[0], arcs[2])
+
+    def test_gap_fit_switch_keeps_accepted_curvature_change_and_refreshes_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            problem = StokesTipCoalescence(R0=.1, Z0=.005, output_dir=out, R_stop=2., tip_gap_cap=6,
+                                           tip_scale_floor=.4, tip_fit_gap_fraction=.25)
+            live = {"t": 0., "R_min": 1., "u_neck": .1, "two_H": 10., "tip_radius": 1.,
+                    "tip_scale": 1., "volume": 4., "h_tip_now": .01, "gap_half_height": .1}
+            def solve(*, timestep, **kwargs):
+                live.update(t=timestep, two_H=14.)
+            def state():
+                if problem.cap_engaged:
+                    problem._last_tip_fit_curvature = -30.
+                    return dict(live, two_H=-30., tip_fit_height=.025)
+                return live.copy()
+            with patch.multiple(problem, is_initialised=Mock(return_value=True), refine_tip=Mock(),
+                                neck_state=Mock(side_effect=state), write_row=Mock(), write_profile=Mock(),
+                                interface_polyline=Mock(return_value=[]), ndof=Mock(return_value=0),
+                                choose_dt=Mock(return_value=.004), _dof_snapshot=Mock(return_value={}),
+                                solve=Mock(side_effect=solve)):
+                summary = problem.run_campaign(max_steps=1)
+            self.assertEqual(summary["final"]["two_H"], -30.)
+            self.assertEqual(problem._last_tip_fit_curvature, -30.)
+            self.assertAlmostEqual(problem._last_curvature_ratio, problem.curvature_change_ratio(10., 14.))
+
+    def test_newton_hook_checks_geometry_and_accepts_flat_gap_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            p = StokesTipCoalescence(R0=.1, Z0=.005, output_dir=out, curvature_step_limit=.2, tip_gap_cap=6,
+                                     tip_scale_floor=.4, tip_fit_gap_fraction=.25)
+            p._template = object()
+            p.cap_engaged = True
+            flat = dict(two_H=1., kappa_m=0., tip_radius=math.inf, tip_scale=.6,
+                        floor_engaged=1., tip_fit_height=.025)
+            p._step_state_before_newton = flat
+            with (patch.object(p, "last_newton_step_failed", return_value=False),
+                  patch.object(p, "validate_domain_geometry") as geometry,
+                  patch.object(p, "interface_polyline", return_value=[(0.,0.), (.02,.1), (.05,.2), (.07,.3), (.1,.4)]),
+                  patch.object(p, "neck_state", return_value=flat),
+                  patch.object(p, "_remesh_reason", return_value=None), patch.object(Problem, "actions_after_newton_solve")):
+                p.actions_after_newton_solve()
+                self.assertIsNone(p._trial_curvature_ratio)
+                geometry.assert_called_once()
+
     def test_late_mapped_geometry_honours_physical_size_and_local_apex(self) -> None:
         import itertools
         import numpy as np

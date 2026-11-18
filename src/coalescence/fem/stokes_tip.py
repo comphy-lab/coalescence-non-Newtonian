@@ -352,6 +352,64 @@ def gap_half_height(poly, r_out: float) -> float:
     return best
 
 
+def symmetric_tip_curvature(poly, height: float, excluded_height: float = 0.0) -> float:
+    """Fit signed meridional curvature on the connected branch above the neck.
+
+    The circle passes through the apex and its centre lies on the symmetry
+    plane. For offsets normalised by height its equation is
+    (kappa*height)*(x*x+z*z) = -2*x. Fit at 16 Gauss points between
+    excluded_height and height, outside the reconstructed apex region on
+    the first ascending Q2 branch, so subdividing an edge leaves the fit
+    unchanged. A straight vertical meniscus has zero curvature.
+    """
+    if not math.isfinite(height) or not 0 <= excluded_height < height or len(poly) < 2:
+        raise ValueError("tip curvature requires a finite positive fit height and an interface")
+    x0, z0 = poly[0]
+    lower = excluded_height / height
+    nodes = lower + (1.0 - lower) * _TIP_FIT_HEIGHTS
+    samples = []
+    for i in range(0, len(poly) - 1, 2):
+        first = poly[i]
+        last = poly[min(i + 2, len(poly) - 1)]
+        mid = poly[i + 1] if i + 2 < len(poly) else (
+            (first[0] + last[0]) / 2, (first[1] + last[1]) / 2)
+        # z(s) = z_start + b*s + c*s**2, 0 <= s <= 1. Stop at
+        # the first horizontal tangent that reverses the ascending branch.
+        dz_mid = (mid[1] - first[1]) / height
+        dz_end = (last[1] - first[1]) / height
+        b = 4 * dz_mid - dz_end
+        c = 2 * (dz_end - 2 * dz_mid)
+        if not all(math.isfinite(value) for value in (*first, *mid, *last)):
+            raise ValueError("non-finite coordinates on the curvature fit branch")
+        if b < 0 or (b == 0 and c <= 0):
+            break
+        end = -b / (2 * c) if b + 2 * c < 0 else 1.0
+        z_start = (first[1] - z0) / height
+        z_end = z_start + end * (b + c * end)
+        while len(samples) < len(nodes) and nodes[len(samples)] <= z_end:
+            dz = max(0.0, nodes[len(samples)] - z_start)
+            # Rationalised positive root, also valid for a linear edge.
+            s = 0.0 if dz == 0 else 2 * dz / (b + math.sqrt(max(0.0, b*b + 4*c*dz)))
+            dx_mid, dx_end = mid[0] - first[0], last[0] - first[0]
+            dx = first[0] - x0 + s * (4 * (1 - s) * dx_mid + (2*s - 1) * dx_end)
+            samples.append(dx / height)
+        if z_end >= 1.0:
+            x = numpy.asarray(samples)
+            q = x*x + nodes*nodes
+            curvature = float(-2 * numpy.dot(_TIP_FIT_WEIGHTS * x, q)
+                              / numpy.dot(_TIP_FIT_WEIGHTS * q, q) / height)
+            if not math.isfinite(curvature):
+                raise ValueError("non-finite fitted tip curvature")
+            return curvature
+        if end < 1.0:
+            break
+    raise ValueError("ascending tip interface does not span the curvature fit height")
+
+
+_TIP_FIT_ABSCISSAE, _TIP_FIT_WEIGHTS = numpy.polynomial.legendre.leggauss(16)
+_TIP_FIT_HEIGHTS = (_TIP_FIT_ABSCISSAE + 1) / 2
+
+
 def point_distance_expression(cx: float, cy: float) -> str:
     """Gmsh MathEval distance from (x, y) to a fixed point.
 
@@ -925,7 +983,15 @@ class MappedTipMesh(GmshTemplate):
             # inside the zone (chord construction). Without such a vertex, retain the Q2 curve.
             # Noise repair must stay local when a flat meridian makes its
             # fitted radius large. Resolved macroscopic Q2 geometry is data.
-            z_apex = min(pb.tip_apex_zone * pb.tip_radius_lagged, pb.h_max)
+            apex_length = pb.tip_radius_lagged
+            if pb.tip_fit_gap_fraction and (pb.cap_engaged or pb._pending_cap_observation):
+                # Rebuild the same physical apex interval when the same Q2
+                # interface arrives with a different previous mesh scale.
+                neck = poly[0][0] + shift
+                apex_length = gap_half_height(poly, 1.05 * neck - shift)
+                if not math.isfinite(apex_length) or apex_length <= 0:
+                    raise ValueError("gap-based remeshing requires a finite positive gap")
+            z_apex = min(pb.tip_apex_zone * apex_length, pb.h_max)
             pb._apex_arc = {}
             j = 0
             while j + 2 < len(poly) and 0.0 < poly[j + 2][1] <= z_apex:
@@ -1218,6 +1284,7 @@ class StokesTipCoalescence(Problem):
         tip_scale_gap_only: bool = False,
         predictor_holdoff: int = 0,
         quality_lookahead_floor: float = 0.0,
+        tip_fit_gap_fraction: float = 0.0,
     ):
         super().__init__()
         # Ohnesorge number; None is the Stokes limit (no inertia, no velocity history). In the
@@ -1420,6 +1487,13 @@ class StokesTipCoalescence(Problem):
             raise ValueError("tip_scale_floor must lie in [0, 1)")
         if self.tip_scale_floor > 0.0 and self.tip_gap_cap <= 0.0:
             raise ValueError("tip_scale_floor requires tip_gap_cap")
+        self.tip_fit_gap_fraction = float(tip_fit_gap_fraction)
+        if not (math.isfinite(self.tip_fit_gap_fraction) and 0 <= self.tip_fit_gap_fraction < 1):
+            raise ValueError("tip_fit_gap_fraction must lie in [0, 1)")
+        if self.tip_fit_gap_fraction and self.tip_scale_floor <= 0:
+            raise ValueError("gap-based tip curvature requires a positive tip_scale_floor")
+        if self.tip_fit_gap_fraction and not (0 <= self.tip_apex_zone < self.tip_fit_gap_fraction):
+            raise ValueError("the gap-based tip fit must extend beyond the reconstructed apex zone")
         # tip_scale_gap_only: once the floor is engaged, the tip scale is tip_gap_cap gap
         # half-heights whatever the fitted radius (the fit is still recorded).  A state so sized
         # counts as clamped: its curvature does not steer the step and a recovery remesh is judged
@@ -1549,6 +1623,13 @@ class StokesTipCoalescence(Problem):
         if self.tip_unresolved(rho):
             return True
         return bool(st.get("floor_engaged")) and st.get("tip_scale", rho) != rho
+
+    @staticmethod
+    def _valid_tip_radius(st: dict[str, float]) -> bool:
+        radius = st["tip_radius"]
+        if st.get("tip_fit_height") and radius == math.inf:
+            return st.get("kappa_m") == 0.0 and 0 < st.get("tip_scale", math.inf) < math.inf
+        return math.isfinite(radius) and radius > 0
 
     def step_curvature_ratio(self, st_prev: dict[str, float], st: dict[str, float]) -> float:
         """Curvature change of an accepted step for the step controller; neutral (1e-12) when
@@ -1900,6 +1981,12 @@ class StokesTipCoalescence(Problem):
         # element size at the tip varies between remeshes.
         d2 = (r - p0[0]) ** 2 + (z - p0[1]) ** 2
         order = sorted(range(n), key=lambda i: d2[i])
+        p1 = (float(r[order[1]]), float(z[order[1]]))
+        poly = self.interface_polyline() if self.tip_gap_cap > 0 else None
+        gap = gap_half_height(poly, 1.05 * rmin - self._frame_shift_now()) if poly is not None else None
+        support = self._step_tip_fit_support
+        reference_matches = support is not None and support[:2] == (self.n_remesh, n)
+        gap_fit = self.tip_fit_gap_fraction > 0 and self.cap_engaged
         # Scale-free fit window: nodes whose chord from the neck makes an angle of at most
         # tip_fit_angle with the tip tangent (the z axis), i.e. about 2*tip_fit_angle of arc
         # on a circle, at least seven nodes.  A fixed node count spans a thousandth of a tip
@@ -1908,34 +1995,41 @@ class StokesTipCoalescence(Problem):
         # Nodes within tip_apex_zone lagged radii of the apex carry position noise larger
         # than their sagitta (at R0=1e-6, ~1e-18 solver units against ~1e-23) and are
         # excluded from the fit.
-        lagged = self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
-        z_apex = self.tip_apex_zone * lagged
-        support = self._step_tip_fit_support
-        if support is not None and support[:2] == (self.n_remesh, n):
-            near = support[2]
+        if gap_fit:
+            if gap is None or not math.isfinite(gap) or gap <= 0:
+                raise ValueError("gap-based tip curvature requires a finite positive gap")
+            # Freeze the physical height across a Newton step just as the
+            # legacy fit freezes its node set. Never reuse it on a new mesh.
+            matched = reference_matches and isinstance(support[2], float)
+            fit_support = support[2] if matched else float(self.tip_fit_gap_fraction * gap)
+            excluded_height = fit_support * (self.tip_apex_zone / self.tip_fit_gap_fraction)
+            kappa_m = symmetric_tip_curvature(poly, fit_support, excluded_height)
+            tip_radius = 1.0 / abs(kappa_m) if kappa_m else math.inf
         else:
-            near = tip_fit_indices(r, z, i0, self.tip_fit_angle, z_apex, self.tip_fit_support * lagged)
-        p1 = (float(r[order[1]]), float(z[order[1]]))
-        circ = fit_circle_kasa([(float(r[i]), float(z[i])) for i in near])
-        if circ is None:
-            kappa_m = 0.0
-            tip_radius = float("inf")
-        else:
-            (cx, _), rho = circ
-            tip_radius = rho
-            kappa_m = -1.0 / rho if cx > p0[0] else 1.0 / rho
+            lagged = self.tip_radius_lagged if math.isfinite(self.tip_radius_lagged) else 0.0
+            matched = reference_matches and isinstance(support[2], tuple)
+            fit_support = support[2] if matched else tuple(tip_fit_indices(
+                r, z, i0, self.tip_fit_angle, self.tip_apex_zone * lagged, self.tip_fit_support * lagged))
+            circ = fit_circle_kasa([(float(r[i]), float(z[i])) for i in fit_support])
+            if circ is None:
+                kappa_m = 0.0
+                tip_radius = math.inf
+            else:
+                (cx, _), tip_radius = circ
+                kappa_m = -1.0 / tip_radius if cx > p0[0] else 1.0 / tip_radius
         two_h = kappa_m + 1.0 / rmin
         extra = {}
+        if gap_fit:
+            extra["tip_fit_height"] = fit_support
         tip_scale = tip_radius
-        if self.tip_gap_cap > 0.0:
-            gap = gap_half_height(self.interface_polyline(), 1.05 * rmin - self._frame_shift_now())
+        if gap is not None:
             floor = self.tip_scale_floor if self.cap_engaged else 0.0
             tip_scale = capped_tip_scale(tip_radius, gap, self.tip_gap_cap, floor, self.tip_scale_gap_only)
             extra["gap_half_height"] = gap
             if floor > 0.0:
                 extra["floor_engaged"] = 1.0
-        if support is None or support[:2] != (self.n_remesh, n):
-            self._last_tip_fit_support = (self.n_remesh, n, tuple(near))
+        if not matched:
+            self._last_tip_fit_support = (self.n_remesh, n, fit_support)
             self._last_tip_fit_curvature = two_h
         h_tip_now = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
         vol = float(self.get_mesh("drop").evaluate_observable("volume"))
@@ -2293,9 +2387,7 @@ class StokesTipCoalescence(Problem):
                             else self._step_state_before_newton["two_H"])
                 current_state = self.neck_state()
                 current = current_state["two_H"]
-                previous_rho = self._step_state_before_newton["tip_radius"]
-                current_rho = current_state["tip_radius"]
-                if not all(math.isfinite(v) and v > 0 for v in (previous_rho, current_rho)):
+                if not all(self._valid_tip_radius(state) for state in (self._step_state_before_newton, current_state)):
                     raise RuntimeError("tip radius is invalid after Newton solve")
                 if not (self.curvature_reading_ignored(self._step_state_before_newton)
                         or self.curvature_reading_ignored(current_state)):
@@ -2513,7 +2605,10 @@ class StokesTipCoalescence(Problem):
         rho_before, rho_after = before["tip_radius"], after["tip_radius"]
         scale_before = before.get("tip_scale", rho_before)
         scale_after = after.get("tip_scale", rho_after)
-        valid = all(math.isfinite(v) and v > 0 for v in (rho_before, rho_after, scale_before, scale_after))
+        valid = (all(StokesTipCoalescence._valid_tip_radius(st) for st in (before, after))
+                 and all(math.isfinite(v) and v > 0 for v in (scale_before, scale_after)))
+        if (before.get("tip_fit_height") or after.get("tip_fit_height")) and not valid:
+            raise RuntimeError("invalid gap-based tip curvature on the recovery remesh")
         capped = scale_before != rho_before or scale_after != rho_after
         gaps = [g for g in (before.get("gap_half_height"), after.get("gap_half_height"))
                 if g is not None and math.isfinite(g) and g > 0]
@@ -2780,11 +2875,20 @@ class StokesTipCoalescence(Problem):
                           f"u*dt={expected:.6e}, ratio={ratio:.6e}", flush=True)
                     status = "kinematic_failure"
                     break
+            # Measure the accepted step before changing estimators. With the
+            # Newton curvature gate off this still supplies the dt controller.
+            accepted_ratio = self.step_curvature_ratio(st_prev, st)
+            had_cap = self.cap_engaged
             self.note_cap_engaged(st)
+            switched_fit = self.tip_fit_gap_fraction > 0 and self.cap_engaged and not had_cap
+            if switched_fit:
+                # Establish the accepted reference on the same estimator that
+                # the next Newton step will use. The switch itself is not motion.
+                st = self.neck_state()
             scale = st.get("tip_scale", st["tip_radius"])
             if self.tip_refine and math.isfinite(scale) and scale > 0 and st["h_tip_now"] <= scale / 4:
                 self.tip_radius_lagged = scale  # trust the measurement only when resolved
-            self._last_curvature_ratio = self.step_curvature_ratio(st_prev, st)
+            self._last_curvature_ratio = accepted_ratio
             iters = None
             try:
                 iters = int(self.get_last_newton_iterations())
@@ -2827,6 +2931,7 @@ class StokesTipCoalescence(Problem):
                 "quality_remesh_ratio": self.quality_remesh_ratio,
                 "crest_refine_fraction": self.crest_refine_fraction, "crest_window": self.crest_window,
                 "tip_fit_support": self.tip_fit_support, "tip_gap_cap": self.tip_gap_cap,
+                "tip_fit_gap_fraction": self.tip_fit_gap_fraction,
                 "tip_scale_floor": self.tip_scale_floor, "tip_scale_gap_only": self.tip_scale_gap_only,
                 "predictor_holdoff": self.predictor_holdoff, "quality_lookahead_floor": self.quality_lookahead_floor,
                 "dt_fraction": self.dt_fraction, "dt_initial": self.dt_initial, "dt_max": self.dt_max,

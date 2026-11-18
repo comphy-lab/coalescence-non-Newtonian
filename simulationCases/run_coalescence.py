@@ -107,12 +107,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--crest-refine-fraction", type=float, default=0.0, help="moving frame, at remeshing: cap elements near a convex interface crest at this fraction of its radius of curvature (0 = off)")
     ap.add_argument("--crest-window", type=float, default=0.25, help="crest refinement: search window behind the neck, in neck radii")
     ap.add_argument("--tip-fit-support", type=float, default=0.0, help="tip fit: always keep the interface nodes up to this many lagged tip radii above the neck (0 = chord-angle lobe only)")
+    ap.add_argument("--tip-fit-gap-fraction", type=float, default=0.0,
+                    help="after the tip-scale floor engages, fit signed apex curvature up to this fraction of the current gap half-height; must exceed --tip-apex-zone (0 disables)")
     ap.add_argument("--tip-gap-cap", type=float, default=0.0, help="cap the tip scale that sizes the mesh and triggers tip-radius remeshes at this many gap half-heights (0 = off)")
     ap.add_argument("--tip-scale-floor", type=float, default=0.0, help="once a state has been capped, keep the tip scale at no less than this fraction of the gap cap (0 = off; needs --tip-gap-cap)")
     ap.add_argument("--tip-scale-gap-only", action="store_true", help="once the tip-scale floor is engaged, size the tip by tip-gap-cap gap half-heights whatever the fitted radius (needs --tip-scale-floor)")
     ap.add_argument("--predictor-holdoff", type=int, default=0, help="accepted steps a mesh must have carried before the linear predictor supplies the first Newton iterate on it (0 = predictor on every step)")
     ap.add_argument("--quality-lookahead-floor", type=float, default=0.0, help="remesh already when the worst element's Jacobian ratio, extrapolated one step ahead, would fall below this value (0 = off; needs a larger --quality-remesh-ratio)")
-    ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone in lagged tip radii: excluded from the tip fit and replaced by a circle at remeshing (0 = off)")
+    ap.add_argument("--tip-apex-zone", type=float, default=0.05, help="apex zone excluded from the fit and eligible for circular reconstruction at remeshing; measured in lagged tip radii, or in gap half-heights once --tip-fit-gap-fraction engages (0 = off)")
     return ap
 
 
@@ -180,6 +182,7 @@ def build_problem(args: argparse.Namespace, bridge: dict, Oh: float | None,
         crest_refine_fraction=args.crest_refine_fraction,
         crest_window=args.crest_window,
         tip_fit_support=args.tip_fit_support,
+        tip_fit_gap_fraction=args.tip_fit_gap_fraction,
         tip_gap_cap=args.tip_gap_cap,
         tip_scale_floor=args.tip_scale_floor,
         tip_scale_gap_only=args.tip_scale_gap_only,
